@@ -4,37 +4,23 @@ import time
 import requests
 import pandas as pd
 import numpy as np
-from flask import Flask, request, jsonify, render_template_string
-from functools import wraps
 from dotenv import load_dotenv
 import base64
 import json
 import re
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import io
 
-app = Flask(__name__)
 load_dotenv()
 
 # Configuration
 CHART_API_KEY = os.getenv("CHART_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Add this to your .env file
 
-@app.route('/')
-def index():
-    return render_template_string('''
-    <html>
-    <head><title>NSE Stock Analyzer</title></head>
-    <body style="font-family: Arial; max-width: 600px; margin: 50px auto; padding: 20px;">
-        <h2>NSE Stock Technical Analysis</h2>
-        <form method="get" action="/analyze">
-            <label>Enter NSE Stock Symbol:</label><br>
-            <input type="text" name="symbol" value="RELIANCE" style="padding: 8px; width: 200px; margin: 10px 0;">
-            <br>
-            <input type="submit" value="Analyze" style="padding: 8px 16px;">
-        </form>
-    </body>
-    </html>
-    ''')
-
+# Keep all your existing functions exactly as they are
 def fetch_charts(symbol, interval='1h'):
     """Download 2 charts within free tier limits"""
     headers = {
@@ -43,7 +29,6 @@ def fetch_charts(symbol, interval='1h'):
     }
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    chart_paths = []
     
     # Chart 1: Price + EMAs + Volume
     chart1_payload = {
@@ -51,7 +36,7 @@ def fetch_charts(symbol, interval='1h'):
         "interval": interval,
         "studies": [
             {"name": "Moving Average Exponential", "inputs": {"length": 20}},
-            {"name": "Moving Average Exponential", "inputs": {"length": 200}},
+            {"name": "Moving Average Exponential", "inputs": {"length": 50}},
             {"name": "Volume"}
         ],
         "theme": "dark",
@@ -80,9 +65,10 @@ def fetch_charts(symbol, interval='1h'):
         (chart2_payload, "rsi_macd")
     ]
     
+    chart_data = []  # Store raw image data instead of files
+    
     try:
         print(f"Downloading charts for {symbol}...")
-        os.makedirs("static", exist_ok=True)
         
         for i, (payload, chart_type) in enumerate(chart_configs, 1):
             try:
@@ -94,11 +80,12 @@ def fetch_charts(symbol, interval='1h'):
                 )
                 
                 if response.status_code == 200:
-                    fname = f"static/{symbol.replace(':', '_')}_{chart_type}_{interval}_{timestamp}.png"
-                    with open(fname, 'wb') as f:
-                        f.write(response.content)
-                    chart_paths.append(fname)
-                    print(f"Chart {i} saved: {fname}")
+                    chart_data.append({
+                        'type': chart_type,
+                        'data': response.content,
+                        'filename': f"{symbol.replace(':', '_')}_{chart_type}_{interval}_{timestamp}.png"
+                    })
+                    print(f"Chart {i} downloaded: {chart_type}")
                     
                     if i < len(chart_configs):
                         time.sleep(6)  # Rate limiting
@@ -109,30 +96,20 @@ def fetch_charts(symbol, interval='1h'):
                 print(f"Error downloading chart {i}: {e}")
                 continue
         
-        return chart_paths if chart_paths else None
+        return chart_data if chart_data else None
             
     except Exception as e:
         print(f"Chart download error: {e}")
         return None
 
-def encode_image_to_base64(image_path):
-    """Convert image to base64"""
-    try:
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-    except Exception as e:
-        print(f"Image encoding error: {e}")
-        return None
-
-def analyze_chart_with_groq(image_path, chart_type):
-    """Analyze chart using Groq API"""
+def analyze_chart_with_groq_telegram(chart_data, chart_type):
+    """Analyze chart using Groq API - modified for telegram (takes raw data)"""
     try:
         if not GROQ_API_KEY:
             return None
         
-        base64_image = encode_image_to_base64(image_path)
-        if not base64_image:
-            return None
+        # Convert raw image data to base64
+        base64_image = base64.b64encode(chart_data).decode('utf-8')
         
         headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -143,7 +120,7 @@ def analyze_chart_with_groq(image_path, chart_type):
             prompt = """Analyze this price chart and extract:
 1. Current stock price (exact number)
 2. EMA 20 value
-3. EMA 200 value  
+3. EMA 50 value  
 4. Support level
 5. Resistance level
 6. Trend (Bullish/Bearish/Neutral)
@@ -194,9 +171,6 @@ def parse_analysis(text, chart_type):
     result = {'raw_analysis': text}
     text_lower = text.lower()
     
-    # Extract numbers using regex
-    numbers = re.findall(r'\d+\.?\d*', text)
-    
     if 'price_emas' in chart_type:
         # Extract price data
         price_match = re.search(r'price.*?(\d+\.?\d*)', text_lower)
@@ -227,21 +201,21 @@ def parse_analysis(text, chart_type):
             result['trend'] = 'Neutral'
     
     else:
-        # Extract technical indicators
+        # Try multiple RSI patterns
         rsi_patterns = [
             r'rsi.*?value.*?(\d+\.?\d*)',
             r'rsi.*?(\d+\.\d+)',
             r'rsi.*?:\s*(\d+\.?\d*)',
             r'current\s+rsi.*?(\d+\.?\d*)',
             r'rsi.*?(\d+\.?\d*)'
-            ]
-        
+        ]
+
         for pattern in rsi_patterns:
             rsi_match = re.search(pattern, text_lower)
             if rsi_match:
                 try:
                     rsi_val = float(rsi_match.group(1))
-                    if 0 <= rsi_val <= 100 and rsi_val > 10:  # Avoid catching period numbers like "14"
+                    if 0 <= rsi_val <= 100 and rsi_val > 10:
                         result['rsi'] = rsi_val
                         break
                 except ValueError:
@@ -254,9 +228,7 @@ def parse_analysis(text, chart_type):
     return result
 
 def generate_trading_analysis(price_data, tech_data, symbol):
-    """Generate trading recommendations"""
-    
-    # Get values with fallbacks
+    """Generate trading recommendations - same as your existing function"""
     current_price = price_data.get('current_price', 1450.0)
     rsi = tech_data.get('rsi', 50.0)
     trend = price_data.get('trend', 'Neutral')
@@ -313,8 +285,8 @@ def generate_trading_analysis(price_data, tech_data, symbol):
         'tech_analysis': tech_data.get('raw_analysis', 'Not available')
     }
 
-def format_analysis_text(text):
-    """Format analysis text with visual enhancements"""
+def format_analysis_text_telegram(text):
+    """Format analysis text for Telegram (no HTML)"""
     if not text:
         return "Analysis not available"
     
@@ -328,7 +300,7 @@ def format_analysis_text(text):
         line = re.sub(r'^\d+\.\s*', '', line)
         line = re.sub(r'^[-*•]\s*', '', line)
         
-        # Add visual icons based on content
+        # Add emojis based on content
         if any(word in line.lower() for word in ['price', 'current', 'trading']):
             icon = '💰'
         elif any(word in line.lower() for word in ['ema', 'moving average', 'ma']):
@@ -348,28 +320,61 @@ def format_analysis_text(text):
         else:
             icon = '📌'
         
-        lines.append(f'<div style="margin: 8px 0; padding: 8px 12px; background: rgba(255,255,255,0.7); border-radius: 6px; border-left: 3px solid #ddd;"><span style="margin-right: 8px;">{icon}</span>{line}</div>')
+        lines.append(f'{icon} {line}')
     
-    return ''.join(lines)
+    return '\n'.join(lines)
 
-@app.route('/analyze')
-def analyze():
-    symbol = request.args.get('symbol', 'RELIANCE').upper()
+# TELEGRAM BOT HANDLERS
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a message when the command /start is issued."""
+    welcome_message = """
+🚀 *NSE Stock Technical Analysis Bot*
+
+📈 *How to use:*
+• Send me any NSE stock symbol (e.g., RELIANCE, TCS, INFY)
+• I'll analyze the charts and provide detailed technical analysis
+• Get trading recommendations with entry/exit levels
+
+💡 *Examples:*
+• RELIANCE
+• TCS
+• INFY
+• HDFCBANK
+
+🔥 Just send the ticker symbol and I'll do the rest!
+    """
+    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+
+async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle stock analysis requests"""
+    symbol = update.message.text.strip().upper()
+    
+    # Basic validation
+    if len(symbol) > 20 or not symbol.isalpha():
+        await update.message.reply_text("❌ Please send a valid NSE stock symbol (e.g., RELIANCE, TCS)")
+        return
+    
+    # Send initial message
+    status_message = await update.message.reply_text(f"🔍 Analyzing {symbol}...\n⏳ Downloading charts...")
     
     try:
         # Download charts
-        chart_paths = fetch_charts(f"NSE:{symbol}", interval='1h')
+        chart_data = fetch_charts(f"NSE:{symbol}", interval='1h')
         
-        if not chart_paths:
-            return f"<h3>Error: Could not download charts for {symbol}</h3><a href='/'>Go Back</a>"
+        if not chart_data:
+            await status_message.edit_text(f"❌ Could not download charts for {symbol}. Please check the symbol and try again.")
+            return
+        
+        await status_message.edit_text(f"🔍 Analyzing {symbol}...\n📊 Processing charts with AI...")
         
         # Analyze charts
         price_data = {}
         tech_data = {}
         
-        for chart_path in chart_paths:
-            chart_type = 'price_emas' if 'price_emas' in chart_path else 'rsi_macd'
-            analysis = analyze_chart_with_groq(chart_path, chart_type)
+        for chart in chart_data:
+            chart_type = chart['type']
+            analysis = analyze_chart_with_groq_telegram(chart['data'], chart_type)
             
             if analysis:
                 if chart_type == 'price_emas':
@@ -377,81 +382,86 @@ def analyze():
                 else:
                     tech_data = analysis
         
+        await status_message.edit_text(f"🔍 Analyzing {symbol}...\n🎯 Generating recommendations...")
+        
         # Generate trading analysis
         result = generate_trading_analysis(price_data, tech_data, symbol)
-        result['price_analysis'] = format_analysis_text(result.get('price_analysis', ''))
-        result['tech_analysis'] = format_analysis_text(result.get('tech_analysis', ''))
+        result['price_analysis'] = format_analysis_text_telegram(result.get('price_analysis', ''))
+        result['tech_analysis'] = format_analysis_text_telegram(result.get('tech_analysis', ''))
         
-        # Display results
-        return render_template_string(RESULTS_TEMPLATE, 
-                                    chart_paths=chart_paths, 
-                                    **result)
+        # Send charts first
+        await status_message.edit_text(f"📈 Analysis complete for {symbol}!\n📤 Sending charts...")
+        
+        for chart in chart_data:
+            caption = "📈 Price & EMAs Chart" if chart['type'] == 'price_emas' else "📊 RSI & MACD Chart"
+            await update.message.reply_photo(
+                photo=io.BytesIO(chart['data']),
+                caption=caption,
+                filename=chart['filename']
+            )
+        
+        # Format and send analysis
+        analysis_text = f"""
+📊 *{result['symbol']} Technical Analysis*
+
+💰 *Current Data:*
+• Price: ₹{result['current_price']:.2f}
+• Trend: {result['trend']}
+• RSI: {result['rsi']:.1f}
+• EMA 20: {result['ema_20']}
+• EMA 50: {result['ema_50']}
+• MACD: {result['macd_line']}
+• Support: ₹{result['support']:.2f}
+• Resistance: ₹{result['resistance']:.2f}
+
+🎯 *Trading Signal: {result['signal']}*
+
+📈 *Entry Levels:*
+"""
+        
+        for level, price in result['entry_levels'].items():
+            analysis_text += f"• {level.title()}: ₹{price:.2f}\n"
+        
+        analysis_text += f"""
+🎯 *Targets:*
+• Target 1: ₹{result['targets'][0]:.2f}
+• Target 2: ₹{result['targets'][1]:.2f}
+• Target 3: ₹{result['targets'][2]:.2f}
+
+⛔ *Stop Loss:* ₹{result['stop_loss']:.2f}
+
+📈 *Price & EMAs Analysis:*
+{result['price_analysis']}
+
+📊 *Technical Indicators Analysis:*
+{result['tech_analysis']}
+        """
+        
+        await status_message.delete()
+        await update.message.reply_text(analysis_text, parse_mode='Markdown')
         
     except Exception as e:
-        return f"<h3>Analysis failed: {e}</h3><a href='/'>Go Back</a>"
+        await status_message.edit_text(f"❌ Analysis failed for {symbol}: {str(e)}")
+        print(f"Analysis error: {e}")
 
-RESULTS_TEMPLATE = '''
-<html>
-<head><title>{{ symbol }} Analysis</title></head>
-<body style="font-family: Arial; max-width: 1000px; margin: 20px auto; padding: 20px;">
+def main():
+    """Start the bot."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN not found in environment variables!")
+        return
     
-    <h2>{{ symbol }} Technical Analysis</h2>
-    <a href="/">← Back to Home</a>
+    print("🚀 Starting NSE Stock Analysis Telegram Bot...")
     
-    <h3>Charts</h3>
-    <div style="display: flex; gap: 10px; margin: 10px 0;">
-        {% for chart in chart_paths %}
-        <img src="/{{ chart }}" style="width: 48%; border: 1px solid #ccc;">
-        {% endfor %}
-    </div>
+    # Create application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    <h3>Current Data</h3>
-    <table border="1" style="border-collapse: collapse; width: 100%;">
-        <tr><td><b>Current Price</b></td><td>₹{{ "%.2f"|format(current_price) }}</td></tr>
-        <tr><td><b>Trend</b></td><td>{{ trend }}</td></tr>
-        <tr><td><b>RSI</b></td><td>{{ "%.1f"|format(rsi) }}</td></tr>
-        <tr><td><b>EMA 20</b></td><td>{{ ema_20 }}</td></tr>
-        <tr><td><b>EMA 200</b></td><td>{{ ema_50 }}</td></tr>
-        <tr><td><b>MACD Line</b></td><td>{{ macd_line }}</td></tr>
-        <tr><td><b>Support</b></td><td>₹{{ "%.2f"|format(support) }}</td></tr>
-        <tr><td><b>Resistance</b></td><td>₹{{ "%.2f"|format(resistance) }}</td></tr>
-    </table>
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_stock))
     
-    <h3>Trading Recommendation</h3>
-    <table border="1" style="border-collapse: collapse; width: 100%;">
-        <tr><td><b>Signal</b></td><td><b>{{ signal }}</b></td></tr>
-        <tr><td><b>Entry Levels</b></td><td>
-            {% for level, price in entry_levels.items() %}
-            {{ level.title() }}: ₹{{ "%.2f"|format(price) }}<br>
-            {% endfor %}
-        </td></tr>
-        <tr><td><b>Targets</b></td><td>
-            {% for target in targets %}
-            Target {{ loop.index }}: ₹{{ "%.2f"|format(target) }}<br>
-            {% endfor %}
-        </td></tr>
-        <tr><td><b>Stop Loss</b></td><td>₹{{ "%.2f"|format(stop_loss) }}</td></tr>
-    </table>
-    
-    <h3>Detailed Analysis</h3>
-    <div style="display: flex; gap: 20px; margin: 20px 0;">
-        <div style="flex: 1;">
-            <h4>Price & EMAs Analysis:</h4>
-            <div style="background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%); padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">{{ price_analysis|safe }}</div>
-        </div>
-        <div style="flex: 1;">
-            <h4>Technical Indicators Analysis:</h4>
-            <div style="background: linear-gradient(135deg, #e8f5e8 0%, #f0f8ff 100%); padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">{{ tech_analysis|safe }}</div>
-        </div>
-    </div>
-    
-    <p><a href="/">← Analyze Another Stock</a></p>
-    
-</body>
-</html>
-'''
+    # Run the bot
+    print("✅ Bot is running! Send /start to begin.")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
-    print("NSE Stock Analyzer starting...")
-    print("Access: http://localhost:8080")
-    app.run(debug=True, host='0.0.0.0', port=8080)
+    main()

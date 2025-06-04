@@ -59,7 +59,7 @@ def fetch_charts(symbol, interval='1h'):
         "studies": [
             {"name": "Relative Strength Index", "inputs": {"length": 14}},
             {"name": "Volume", "overrides": {}},
-            {"name": "Moving Average Exponential", "inputs": {"length": 20}}
+            {"name": "Moving Average Exponential", "inputs": {"length": 50}}
         ],
         "theme": "dark",
         "width": 800,

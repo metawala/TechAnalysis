@@ -12,6 +12,8 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import io
+from bs4 import BeautifulSoup
+import yfinance as yf
 
 load_dotenv()
 
@@ -607,6 +609,288 @@ async def split_and_send_message(update, text, parse_mode=None):
         # Small delay between messages
         await asyncio.sleep(0.5)
 
+###############################
+## ALL CODE FOR RELATIVE RSI ##
+###############################
+
+def get_stock_market_cap_category(symbol):
+    """
+    Dynamically determine stock category (Large/Mid/Small cap) using yfinance
+    """
+    try:
+        # Try NSE symbol first, then BSE if needed
+        nse_symbol = f"{symbol}.NS"
+        stock = yf.Ticker(nse_symbol)
+        info = stock.info
+        
+        # Get market cap in INR (yfinance returns in USD, so we convert)
+        market_cap_usd = info.get('marketCap', 0)
+        
+        if market_cap_usd == 0:
+            # Try BSE symbol as fallback
+            bse_symbol = f"{symbol}.BO"
+            stock = yf.Ticker(bse_symbol)
+            info = stock.info
+            market_cap_usd = info.get('marketCap', 0)
+        
+        if market_cap_usd == 0:
+            print(f"❌ Could not fetch market cap for {symbol}")
+            return None, None
+            
+        # Convert USD to INR (approximate rate: 1 USD = 83 INR)
+        market_cap_inr = market_cap_usd * 83
+        
+        # Indian market cap categories (in crores)
+        market_cap_crores = market_cap_inr / 10000000  # Convert to crores
+        
+        print(f"📊 {symbol} Market Cap: ₹{market_cap_crores:.0f} crores")
+        
+        # Categorize based on Indian market standards
+        if market_cap_crores >= 20000:  # 20,000+ crores = Large Cap
+            return "Large Cap", "^NSEI"  # Nifty 50
+        elif market_cap_crores >= 5000:  # 5,000-20,000 crores = Mid Cap
+            return "Mid Cap", "^NSEMDCP50"  # Nifty Midcap 50
+        else:  # < 5,000 crores = Small Cap
+            return "Small Cap", "^CNXSC"  # Nifty Smallcap 100
+            
+    except Exception as e:
+        print(f"❌ Error fetching market cap for {symbol}: {e}")
+        return None, None
+
+def calculate_relative_strength(stock_symbol, benchmark_symbol, period='3mo'):
+    """
+    Calculate relative strength of stock vs benchmark index
+    """
+    try:
+        # Fetch stock data
+        stock_data = yf.download(f"{stock_symbol}.NS", period=period, interval='1d')
+        if stock_data.empty:
+            stock_data = yf.download(f"{stock_symbol}.BO", period=period, interval='1d')
+        
+        # Fetch benchmark data
+        benchmark_data = yf.download(benchmark_symbol, period=period, interval='1d')
+        
+        if stock_data.empty or benchmark_data.empty:
+            return None
+        
+        # Calculate returns
+        stock_start = stock_data['Close'].iloc[0]
+        stock_end = stock_data['Close'].iloc[-1]
+        stock_return = ((stock_end - stock_start) / stock_start) * 100
+        
+        benchmark_start = benchmark_data['Close'].iloc[0]
+        benchmark_end = benchmark_data['Close'].iloc[-1]
+        benchmark_return = ((benchmark_end - benchmark_start) / benchmark_start) * 100
+        
+        # Calculate relative strength
+        relative_strength = stock_return - benchmark_return
+        
+        # Calculate correlation (optional but useful)
+        aligned_data = pd.concat([
+            stock_data['Close'].pct_change().dropna(),
+            benchmark_data['Close'].pct_change().dropna()
+        ], axis=1, keys=['Stock', 'Benchmark']).dropna()
+        
+        correlation = aligned_data.corr().iloc[0, 1] if len(aligned_data) > 1 else 0
+        
+        return {
+            'stock_return': stock_return,
+            'benchmark_return': benchmark_return,
+            'relative_strength': relative_strength,
+            'correlation': correlation,
+            'outperforming': relative_strength > 0
+        }
+        
+    except Exception as e:
+        print(f"❌ Error calculating relative strength: {e}")
+        return None
+
+def get_benchmark_name(benchmark_symbol):
+    """Get friendly name for benchmark index"""
+    benchmark_names = {
+        "^NSEI": "Nifty 50",
+        "^NSEMDCP50": "Nifty Midcap 50", 
+        "^CNXSC": "Nifty Smallcap 100",
+        "^NSMIDCP": "Nifty Midcap 150"
+    }
+    return benchmark_names.get(benchmark_symbol, benchmark_symbol)
+
+# Modify the generate_trading_analysis function to include relative strength
+def generate_trading_analysis_with_relative_strength(price_data, tech_data, symbol):
+    """Generate enhanced trading recommendations with relative strength analysis"""
+    
+    # Get existing analysis
+    result = generate_trading_analysis(price_data, tech_data, symbol)
+    
+    # Add relative strength analysis
+    print(f"🔍 Determining market cap category for {symbol}...")
+    category, benchmark_symbol = get_stock_market_cap_category(symbol)
+    
+    if category and benchmark_symbol:
+        print(f"📊 {symbol} categorized as: {category}")
+        print(f"🎯 Benchmark: {get_benchmark_name(benchmark_symbol)}")
+        
+        # Calculate relative strength
+        rel_strength = calculate_relative_strength(symbol, benchmark_symbol)
+        
+        if rel_strength:
+            result.update({
+                'market_cap_category': category,
+                'benchmark_index': get_benchmark_name(benchmark_symbol),
+                'benchmark_symbol': benchmark_symbol,
+                'stock_3m_return': rel_strength['stock_return'],
+                'benchmark_3m_return': rel_strength['benchmark_return'],
+                'relative_strength': rel_strength['relative_strength'],
+                'correlation': rel_strength['correlation'],
+                'outperforming_benchmark': rel_strength['outperforming']
+            })
+        else:
+            result.update({
+                'market_cap_category': category,
+                'benchmark_index': get_benchmark_name(benchmark_symbol),
+                'relative_strength_error': 'Could not calculate relative strength'
+            })
+    else:
+        result.update({
+            'market_cap_category': 'Unknown',
+            'relative_strength_error': 'Could not determine market cap category'
+        })
+    
+    return result
+
+# Update the create_summary_analysis function to include relative strength
+def create_summary_analysis_with_relative_strength(result):
+    """Create a comprehensive summary including relative strength analysis"""
+    
+    # Base summary (keep existing content)
+    summary = f"""📋 COMPREHENSIVE ANALYSIS SUMMARY FOR {result['symbol']}
+
+🏢 MARKET CLASSIFICATION:
+Stock Category: {result.get('market_cap_category', 'Unknown')}
+Benchmark Index: {result.get('benchmark_index', 'N/A')}
+
+🔍 RELATIVE PERFORMANCE (3-Month):"""
+    
+    if result.get('relative_strength') is not None:
+        rs = result['relative_strength']
+        stock_ret = result['stock_3m_return']
+        bench_ret = result['benchmark_3m_return']
+        correlation = result['correlation']
+        
+        summary += f"""
+Stock Return: {stock_ret:+.2f}%
+Benchmark Return: {bench_ret:+.2f}%
+Relative Strength: {rs:+.2f}%
+Correlation: {correlation:.2f}
+Performance: {'✅ OUTPERFORMING' if rs > 0 else '❌ UNDERPERFORMING'} benchmark"""
+        
+        # Add interpretation
+        if rs > 5:
+            summary += f"\n🚀 Strong outperformance vs {result.get('benchmark_index')}"
+        elif rs > 0:
+            summary += f"\n📈 Modest outperformance vs {result.get('benchmark_index')}"
+        elif rs > -5:
+            summary += f"\n📉 Slight underperformance vs {result.get('benchmark_index')}"
+        else:
+            summary += f"\n⚠️ Significant underperformance vs {result.get('benchmark_index')}"
+    else:
+        summary += f"""
+❌ Relative strength data unavailable
+{result.get('relative_strength_error', 'Unknown error')}"""
+    
+    summary += f"""
+
+🔍 MARKET OVERVIEW:
+Current market sentiment shows {result['trend'].lower()} bias with RSI at {result['rsi']:.1f} (using 27-80 range). Price is trading at ₹{result['current_price']:.2f} with the stock showing {result['signal'].lower()} characteristics.
+
+📈 PRICE ACTION ANALYSIS:
+The stock is positioned relative to key EMAs with EMA20 at {result['ema_20']}, EMA50 at {result['ema_50']}, and EMA200 at {result['ema_200']}. 
+
+Key support zones are identified at ₹{result['support_levels'][0]:.2f} (primary), ₹{result['support_levels'][1]:.2f} (secondary), and ₹{result['support_levels'][2]:.2f} (tertiary). 
+
+Resistance barriers are located at ₹{result['resistance_levels'][0]:.2f} (immediate), ₹{result['resistance_levels'][1]:.2f} (intermediate), and ₹{result['resistance_levels'][2]:.2f} (strong).
+
+🔧 TECHNICAL INDICATORS:
+RSI reading of {result['rsi']:.1f} suggests {"oversold conditions" if result['rsi'] < 27 else "overbought conditions" if result['rsi'] > 80 else "neutral momentum"}. MACD signals show {result['macd_line']} line against {result['macd_signal']} signal line.
+
+🎯 PATTERN RECOGNITION:
+Chart structure reveals {result['chart_pattern'].lower()} formation with {result['candlestick_pattern'].lower()} candlestick patterns. The overall trendline pattern appears {result['trendline_pattern'].lower()}.
+
+💡 TRADING STRATEGY:
+Recommended approach is {result['trading_style'].lower()} with {result['time_horizon']} time horizon. Current signal strength: {result['signal']}.
+
+Risk management suggests stop loss at ₹{result['stop_loss']:.2f} with profit targets at ₹{result['targets'][0]:.2f}, ₹{result['targets'][1]:.2f}, and ₹{result['targets'][2]:.2f}.
+
+⚠️ DISCLAIMER: This analysis is for educational purposes. Always conduct your own research and risk assessment before trading."""
+    
+    return summary
+
+# Also update the main analysis message format in analyze_stock function to include relative strength
+# Add this section after the existing main_analysis content:
+def get_updated_main_analysis_text(result):
+    """Updated main analysis text with relative strength"""
+    
+    main_analysis = f"""📊 {result['symbol']} Technical Analysis (3-Month Hourly)
+
+🏢 Market Category: {result.get('market_cap_category', 'Unknown')}
+📈 Benchmark: {result.get('benchmark_index', 'N/A')}"""
+    
+    if result.get('relative_strength') is not None:
+        rs_emoji = "🚀" if result['relative_strength'] > 0 else "📉"
+        stock_ret = result.get('stock_3m_return', 0)
+        bench_ret = result.get('benchmark_3m_return', 0)
+        rs_value = result['relative_strength']
+        
+        main_analysis += f"""
+{rs_emoji} Relative Performance (3M):
+  Stock: {stock_ret:+.2f}% | Benchmark: {bench_ret:+.2f}% | RS: {rs_value:+.2f}%"""
+    
+    main_analysis += f"""
+
+💰 Market Data:
+• Price: ₹{result['current_price']:.2f} | Trend: {result['trend']} | RSI: {result['rsi']:.1f}
+• EMA20/50/200: {result['ema_20']}/{result['ema_50']}/{result['ema_200']}
+
+🎯 Support Levels:
+• S1: ₹{result['support_levels'][0]:.2f} | S2: ₹{result['support_levels'][1]:.2f} | S3: ₹{result['support_levels'][2]:.2f}
+
+🚀 Resistance Levels:
+• R1: ₹{result['resistance_levels'][0]:.2f} | R2: ₹{result['resistance_levels'][1]:.2f} | R3: ₹{result['resistance_levels'][2]:.2f}
+
+🔥 Signal: {result.get('enhanced_signal', result['signal'])}
+⏰ Strategy: {result['trading_style']} | Time: {result['time_horizon']}
+
+🕯️ Patterns:
+• Chart: {result['chart_pattern']} | Candle: {result['candlestick_pattern']}
+• Trendline: {result['trendline_pattern']}"""
+    
+    return main_analysis
+
+def generate_enhanced_signal_with_relative_strength(result):
+    """Generate enhanced signal considering relative strength"""
+    base_signal = result['signal']
+    rs = result.get('relative_strength', 0)
+    
+    # Enhance signal based on relative strength
+    if rs > 10:  # Strong outperformance
+        if base_signal in ['BUY', 'STRONG BUY']:
+            enhanced_signal = 'STRONG BUY (RS+)'
+        elif base_signal == 'HOLD':
+            enhanced_signal = 'BUY (RS+)'
+        else:
+            enhanced_signal = base_signal
+    elif rs < -10:  # Strong underperformance
+        if base_signal in ['SELL', 'STRONG SELL']:
+            enhanced_signal = 'STRONG SELL (RS-)'
+        elif base_signal == 'HOLD':
+            enhanced_signal = 'SELL (RS-)'
+        else:
+            enhanced_signal = base_signal
+    else:
+        enhanced_signal = base_signal
+    
+    return enhanced_signal
+
 # TELEGRAM BOT HANDLERS
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -659,13 +943,29 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await status_message.edit_text(f"🔍 Analyzing {symbol}...\n🤖 AI processing 3-month charts...")
         
-        # Analyze charts with enhanced AI prompts
+        # Get relative strength data first for AI context
+        category, benchmark_symbol = get_stock_market_cap_category(symbol)
+        relative_strength_context = None
+
+        if category and benchmark_symbol:
+            rel_strength = calculate_relative_strength(symbol, benchmark_symbol)
+            if rel_strength:
+                relative_strength_context = {
+                    'category': category,
+                    'benchmark_name': get_benchmark_name(benchmark_symbol),
+                    'stock_return': rel_strength['stock_return'],
+                    'benchmark_return': rel_strength['benchmark_return'],
+                    'relative_strength': rel_strength['relative_strength'],
+                    'outperforming': rel_strength['outperforming']
+                }
+
+        # Analyze charts with enhanced AI prompts including relative strength
         price_data = {}
         tech_data = {}
-        
+
         for chart in chart_data:
             chart_type = chart['type']
-            analysis = analyze_chart_with_groq_telegram(chart['data'], chart_type)
+            analysis = analyze_chart_with_groq_telegram(chart['data'], chart_type, relative_strength_context)
             
             if analysis:
                 if chart_type == 'price_emas':
@@ -676,9 +976,10 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text(f"🔍 Analyzing {symbol}...\n🎯 Generating trading strategy...")
         
         # Generate enhanced trading analysis
-        result = generate_trading_analysis(price_data, tech_data, symbol)
+        result = generate_trading_analysis_with_relative_strength(price_data, tech_data, symbol)
         result['price_analysis'] = format_analysis_text_telegram(result.get('price_analysis', ''))
         result['tech_analysis'] = format_analysis_text_telegram(result.get('tech_analysis', ''))
+        result['enhanced_signal'] = generate_enhanced_signal_with_relative_strength(result)
         
         # Send charts first
         await status_message.edit_text(f"📈 Analysis complete for {symbol}!\n📤 Sending charts...")
@@ -692,24 +993,7 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         
         # Create main analysis message - PLAIN TEXT VERSION (no Markdown)
-        main_analysis = f"""📊 {result['symbol']} Technical Analysis (3-Month Hourly)
-
-💰 Market Data:
-• Price: ₹{result['current_price']:.2f} | Trend: {result['trend']} | RSI: {result['rsi']:.1f}
-• EMA20/50/200: {result['ema_20']}/{result['ema_50']}/{result['ema_200']}
-
-🎯 Support Levels:
-• S1: ₹{result['support_levels'][0]:.2f} | S2: ₹{result['support_levels'][1]:.2f} | S3: ₹{result['support_levels'][2]:.2f}
-
-🚀 Resistance Levels:
-• R1: ₹{result['resistance_levels'][0]:.2f} | R2: ₹{result['resistance_levels'][1]:.2f} | R3: ₹{result['resistance_levels'][2]:.2f}
-
-🔥 Signal: {result['signal']}
-⏰ Strategy: {result['trading_style']} | Time: {result['time_horizon']}
-
-🕯️ Patterns:
-• Chart: {result['chart_pattern']} | Candle: {result['candlestick_pattern']}
-• Trendline: {result['trendline_pattern']}"""
+        main_analysis = get_updated_main_analysis_text(result)
         
         # Entry and targets message
         entry_analysis = f"""📈 Entry Strategies:
@@ -743,7 +1027,7 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await split_and_send_message(update, ai_analysis)
         
         # Send comprehensive summary analysis
-        summary_text = create_summary_analysis(result)
+        summary_text = create_summary_analysis_with_relative_strength(result)
         await asyncio.sleep(1)  # Small delay
         await update.message.reply_text("📋 COMPREHENSIVE SUMMARY")
         await split_and_send_message(update, summary_text)

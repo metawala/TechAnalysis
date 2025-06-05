@@ -459,6 +459,7 @@ def generate_trading_analysis(price_data, tech_data, symbol):
         signal = 'HOLD'
         
     print()
+    print("------------------- RSI: " + str(rsi))
     print("------------------- SIGNAL: " + signal)
     print()
     

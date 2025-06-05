@@ -18,11 +18,13 @@ load_dotenv()
 # Configuration
 CHART_API_KEY = os.getenv("CHART_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Add this to your .env file
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Keep all your existing functions exactly as they are
+# Telegram message length limit
+MAX_MESSAGE_LENGTH = 4000  # Leave some buffer under 4096 limit
+
 def fetch_charts(symbol, interval='1h'):
-    """Download 2 charts within free tier limits"""
+    """Download 2 charts with 3-month range using range parameter"""
     headers = {
         "x-api-key": CHART_API_KEY,
         "Content-Type": "application/json"
@@ -30,34 +32,34 @@ def fetch_charts(symbol, interval='1h'):
     
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     
-    # Chart 1: Price + EMAs + Volume
+    # Chart 1: Price + EMAs + Volume (3 months range)
     chart1_payload = {
         "symbol": symbol,
         "interval": interval,
+        "range": "3M",  # 3 months of data
         "studies": [
-            {"name": "Moving Average Exponential", "inputs": {"length": 20}},
-            {"name": "Moving Average Exponential", "inputs": {"length": 50}},
-            {"name": "Volume"}
+            {"name": "Moving Average Exponential", "input": {"length": 20}},
+            {"name": "Moving Average Exponential", "input": {"length": 50}},
+            {"name": "Moving Average Exponential", "input": {"length": 200}},
         ],
         "theme": "dark",
         "width": 800,
-        "height": 600,
-        "bars": 100
+        "height": 600
     }
     
-    # Chart 2: RSI + MACD + Volume
+    # Chart 2: RSI + MACD + Volume (3 months range)
     chart2_payload = {
         "symbol": symbol,
         "interval": interval,
+        "range": "3M",  # 3 months of data
         "studies": [
-            {"name": "Relative Strength Index", "inputs": {"length": 14}},
-            {"name": "MACD", "inputs": {"fast_length": 12, "slow_length": 26, "signal_length": 9}},
+            {"name": "Relative Strength Index", "input": {"length": 14}},
+            {"name": "MACD", "input": {"fast_length": 12, "slow_length": 26, "signal_length": 9}},
             {"name": "Volume"}
         ],
         "theme": "dark",
         "width": 800,
-        "height": 600,
-        "bars": 100
+        "height": 600
     }
     
     chart_configs = [
@@ -103,7 +105,7 @@ def fetch_charts(symbol, interval='1h'):
         return None
 
 def analyze_chart_with_groq_telegram(chart_data, chart_type):
-    """Analyze chart using Groq API - modified for telegram (takes raw data)"""
+    """Analyze chart using Groq API with enhanced prompts for patterns and trading style"""
     try:
         if not GROQ_API_KEY:
             return None
@@ -117,24 +119,60 @@ def analyze_chart_with_groq_telegram(chart_data, chart_type):
         }
         
         if 'price_emas' in chart_type:
-            prompt = """Analyze this price chart and extract:
+            prompt = """Analyze this 3-month hourly price chart and provide concise analysis:
+
+PRICE DATA:
 1. Current stock price (exact number)
 2. EMA 20 value
-3. EMA 50 value  
-4. Support level
-5. Resistance level
-6. Trend (Bullish/Bearish/Neutral)
-7. Candlestick patterns visible
-Provide specific numerical values."""
+3. EMA 50 value
+4. EMA 200 value
+
+SUPPORT & RESISTANCE LEVELS (Provide 3 each):
+4. Support Level 1 (strongest support)
+5. Support Level 2 (secondary support)
+6. Support Level 3 (tertiary support)
+7. Resistance Level 1 (strongest resistance)
+8. Resistance Level 2 (secondary resistance)
+9. Resistance Level 3 (tertiary resistance)
+
+TREND & PATTERNS:
+10. Overall Trend (Bullish/Bearish/Neutral)
+11. Chart Pattern (Head & Shoulders, Triangle, Channel, Flag, Wedge, etc.)
+12. Candlestick Pattern (Doji, Hammer, Engulfing, etc.)
+13. Trendline Pattern (Ascending, Descending, Sideways)
+
+TRADING RECOMMENDATION:
+14. Trading Style (Day Trading/Swing Trading/Position Trading)
+15. Time Horizon (specific duration like "2-4 hours", "3-7 days", "2-8 weeks")
+
+Provide specific numerical values and clear pattern names. Keep analysis concise."""
         else:
-            prompt = """Analyze this technical indicators chart:
+            prompt = """Analyze this 3-month hourly technical indicators chart concisely:
+
+TECHNICAL INDICATORS:
 1. Current RSI value (0-100)
-2. MACD line value
-3. MACD signal line value
-4. Volume trend (High/Low/Average)
-5. Any divergences
-6. Momentum (Increasing/Decreasing)
-Provide specific numbers and analysis."""
+2. RSI Trend (Oversold <27, Neutral 27-80, Overbought >80) - NOTE: Use 27-80 range, not conventional 30-70
+3. MACD line value
+4. MACD signal line value
+5. MACD Histogram trend
+6. Volume trend (High/Low/Average compared to recent average)
+
+MOMENTUM & DIVERGENCES:
+7. Momentum (Increasing/Decreasing/Neutral)
+8. Any RSI divergences with price
+9. Any MACD divergences with price
+10. Volume divergences
+
+TRADING SIGNALS:
+11. RSI trading signal (Buy if <27, Sell if >80, Hold if 27-80)
+12. MACD trading signal (Buy/Sell/Hold)
+13. Overall momentum signal
+
+TRADING RECOMMENDATION:
+14. Recommended Trading Style (Day Trading/Swing Trading/Position Trading)
+15. Time Horizon (specific duration like "2-4 hours", "3-7 days", "2-8 weeks")
+
+Provide specific numbers and clear analysis. Keep response concise."""
         
         payload = {
             "model": "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -147,7 +185,7 @@ Provide specific numbers and analysis."""
                     ]
                 }
             ],
-            "max_tokens": 800,
+            "max_tokens": 800,  # Reduced to keep responses shorter
             "temperature": 0.1
         }
         
@@ -165,18 +203,51 @@ Provide specific numbers and analysis."""
     except Exception as e:
         print(f"Groq analysis error: {e}")
         return None
+    
+    
+def create_summary_analysis(result):
+    """Create a comprehensive summary of both price and technical analysis"""
+    summary = f"""📋 COMPREHENSIVE ANALYSIS SUMMARY FOR {result['symbol']}
+
+🔍 MARKET OVERVIEW:
+Current market sentiment shows {result['trend'].lower()} bias with RSI at {result['rsi']:.1f} (using 27-80 range). Price is trading at ₹{result['current_price']:.2f} with the stock showing {result['signal'].lower()} characteristics.
+
+📈 PRICE ACTION ANALYSIS:
+The stock is positioned relative to key EMAs with EMA20 at {result['ema_20']}, EMA50 at {result['ema_50']}, and EMA200 at {result['ema_200']}. 
+
+Key support zones are identified at ₹{result['support_levels'][0]:.2f} (primary), ₹{result['support_levels'][1]:.2f} (secondary), and ₹{result['support_levels'][2]:.2f} (tertiary). 
+
+Resistance barriers are located at ₹{result['resistance_levels'][0]:.2f} (immediate), ₹{result['resistance_levels'][1]:.2f} (intermediate), and ₹{result['resistance_levels'][2]:.2f} (strong).
+
+🔧 TECHNICAL INDICATORS:
+RSI reading of {result['rsi']:.1f} suggests {"oversold conditions" if result['rsi'] < 27 else "overbought conditions" if result['rsi'] > 80 else "neutral momentum"}. MACD signals show {result['macd_line']} line against {result['macd_signal']} signal line.
+
+🎯 PATTERN RECOGNITION:
+Chart structure reveals {result['chart_pattern'].lower()} formation with {result['candlestick_pattern'].lower()} candlestick patterns. The overall trendline pattern appears {result['trendline_pattern'].lower()}.
+
+💡 TRADING STRATEGY:
+Recommended approach is {result['trading_style'].lower()} with {result['time_horizon']} time horizon. Current signal strength: {result['signal']}.
+
+Risk management suggests stop loss at ₹{result['stop_loss']:.2f} with profit targets at ₹{result['targets'][0]:.2f}, ₹{result['targets'][1]:.2f}, and ₹{result['targets'][2]:.2f}.
+
+⚠️ DISCLAIMER: This analysis is for educational purposes. Always conduct your own research and risk assessment before trading."""
+    
+    return summary
+
+
 
 def parse_analysis(text, chart_type):
-    """Parse analysis text and extract data"""
+    """Parse analysis text and extract data with multiple support/resistance levels and patterns"""
     result = {'raw_analysis': text}
     text_lower = text.lower()
     
     if 'price_emas' in chart_type:
         # Extract price data
-        price_match = re.search(r'price.*?(\d+\.?\d*)', text_lower)
+        price_match = re.search(r'(?:current\s+)?price.*?(\d+\.?\d*)', text_lower)
         if price_match:
             result['current_price'] = float(price_match.group(1))
         
+        # Extract EMAs
         ema20_match = re.search(r'ema.*?20.*?(\d+\.?\d*)', text_lower)
         if ema20_match:
             result['ema_20'] = float(ema20_match.group(1))
@@ -185,29 +256,131 @@ def parse_analysis(text, chart_type):
         if ema50_match:
             result['ema_50'] = float(ema50_match.group(1))
         
-        support_match = re.search(r'support.*?(\d+\.?\d*)', text_lower)
-        if support_match:
-            result['support'] = float(support_match.group(1))
+        ema200_match = re.search(r'ema.*?200.*?(\d+\.?\d*)', text_lower)
+        if ema200_match:
+            result['ema_200'] = float(ema200_match.group(1))
         
-        resistance_match = re.search(r'resistance.*?(\d+\.?\d*)', text_lower)
-        if resistance_match:
-            result['resistance'] = float(resistance_match.group(1))
+        # Extract multiple support levels
+        support_levels = []
+        support_patterns = [
+            r'support\s+level\s+1.*?(\d+\.?\d*)',
+            r'support\s+1.*?(\d+\.?\d*)',
+            r'strongest\s+support.*?(\d+\.?\d*)',
+            r'support\s+level\s+2.*?(\d+\.?\d*)',
+            r'support\s+2.*?(\d+\.?\d*)',
+            r'secondary\s+support.*?(\d+\.?\d*)',
+            r'support\s+level\s+3.*?(\d+\.?\d*)',
+            r'support\s+3.*?(\d+\.?\d*)',
+            r'tertiary\s+support.*?(\d+\.?\d*)'
+        ]
         
+        for pattern in support_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                support_levels.append(float(match.group(1)))
+        
+        # If we didn't get 3 specific levels, try general support mentions
+        if len(support_levels) < 3:
+            general_supports = re.findall(r'support.*?(\d+\.?\d*)', text_lower)
+            for support in general_supports:
+                if float(support) not in support_levels:
+                    support_levels.append(float(support))
+                if len(support_levels) >= 3:
+                    break
+        
+        result['support_levels'] = support_levels[:3] if support_levels else []
+        
+        # Extract multiple resistance levels
+        resistance_levels = []
+        resistance_patterns = [
+            r'resistance\s+level\s+1.*?(\d+\.?\d*)',
+            r'resistance\s+1.*?(\d+\.?\d*)',
+            r'strongest\s+resistance.*?(\d+\.?\d*)',
+            r'resistance\s+level\s+2.*?(\d+\.?\d*)',
+            r'resistance\s+2.*?(\d+\.?\d*)',
+            r'secondary\s+resistance.*?(\d+\.?\d*)',
+            r'resistance\s+level\s+3.*?(\d+\.?\d*)',
+            r'resistance\s+3.*?(\d+\.?\d*)',
+            r'tertiary\s+resistance.*?(\d+\.?\d*)'
+        ]
+        
+        for pattern in resistance_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                resistance_levels.append(float(match.group(1)))
+        
+        # If we didn't get 3 specific levels, try general resistance mentions
+        if len(resistance_levels) < 3:
+            general_resistances = re.findall(r'resistance.*?(\d+\.?\d*)', text_lower)
+            for resistance in general_resistances:
+                if float(resistance) not in resistance_levels:
+                    resistance_levels.append(float(resistance))
+                if len(resistance_levels) >= 3:
+                    break
+        
+        result['resistance_levels'] = resistance_levels[:3] if resistance_levels else []
+        
+        # Extract trend
         if 'bullish' in text_lower:
             result['trend'] = 'Bullish'
         elif 'bearish' in text_lower:
             result['trend'] = 'Bearish'
         else:
             result['trend'] = 'Neutral'
+        
+        # Extract chart patterns
+        chart_patterns = ['head and shoulders', 'triangle', 'channel', 'flag', 'wedge', 'pennant', 'cup and handle', 'double top', 'double bottom']
+        for pattern in chart_patterns:
+            if pattern in text_lower:
+                result['chart_pattern'] = pattern.title()
+                break
+        
+        # Extract candlestick patterns
+        candle_patterns = ['doji', 'hammer', 'engulfing', 'shooting star', 'hanging man', 'spinning top', 'marubozu']
+        for pattern in candle_patterns:
+            if pattern in text_lower:
+                result['candlestick_pattern'] = pattern.title()
+                break
+        
+        # Extract trendline pattern
+        if 'ascending' in text_lower:
+            result['trendline_pattern'] = 'Ascending'
+        elif 'descending' in text_lower:
+            result['trendline_pattern'] = 'Descending'
+        elif 'sideways' in text_lower:
+            result['trendline_pattern'] = 'Sideways'
+        
+        # Extract trading style and time horizon
+        if 'day trading' in text_lower:
+            result['trading_style'] = 'Day Trading'
+        elif 'swing trading' in text_lower:
+            result['trading_style'] = 'Swing Trading'
+        elif 'position trading' in text_lower:
+            result['trading_style'] = 'Position Trading'
+        
+        # Extract time horizon
+        time_patterns = [
+            r'(\d+-\d+\s+hours?)',
+            r'(\d+-\d+\s+days?)',
+            r'(\d+-\d+\s+weeks?)',
+            r'(\d+\s+hours?)',
+            r'(\d+\s+days?)',
+            r'(\d+\s+weeks?)'
+        ]
+        
+        for pattern in time_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                result['time_horizon'] = match.group(1)
+                break
     
     else:
-        # Try multiple RSI patterns
+        # Extract RSI data with multiple patterns
         rsi_patterns = [
             r'rsi.*?value.*?(\d+\.?\d*)',
-            r'rsi.*?(\d+\.\d+)',
-            r'rsi.*?:\s*(\d+\.?\d*)',
             r'current\s+rsi.*?(\d+\.?\d*)',
-            r'rsi.*?(\d+\.?\d*)'
+            r'rsi.*?(\d+\.\d+)',
+            r'rsi.*?:\s*(\d+\.?\d*)'
         ]
 
         for pattern in rsi_patterns:
@@ -215,57 +388,105 @@ def parse_analysis(text, chart_type):
             if rsi_match:
                 try:
                     rsi_val = float(rsi_match.group(1))
-                    if 0 <= rsi_val <= 100 and rsi_val > 10:
+                    if 0 <= rsi_val <= 100:
                         result['rsi'] = rsi_val
                         break
                 except ValueError:
                     continue
         
-        macd_match = re.search(r'macd.*?line.*?(\d+\.?\d*)', text_lower)
-        if macd_match:
-            result['macd_line'] = float(macd_match.group(1))
+        # Extract MACD data
+        macd_line_match = re.search(r'macd\s+line.*?(\d+\.?\d*)', text_lower)
+        if macd_line_match:
+            result['macd_line'] = float(macd_line_match.group(1))
+        
+        macd_signal_match = re.search(r'macd\s+signal.*?(\d+\.?\d*)', text_lower)
+        if macd_signal_match:
+            result['macd_signal'] = float(macd_signal_match.group(1))
+        
+        # Extract trading style and time horizon for technical analysis too
+        if 'day trading' in text_lower:
+            result['trading_style'] = 'Day Trading'
+        elif 'swing trading' in text_lower:
+            result['trading_style'] = 'Swing Trading'
+        elif 'position trading' in text_lower:
+            result['trading_style'] = 'Position Trading'
+        
+        # Extract time horizon
+        time_patterns = [
+            r'(\d+-\d+\s+hours?)',
+            r'(\d+-\d+\s+days?)',
+            r'(\d+-\d+\s+weeks?)',
+            r'(\d+\s+hours?)',
+            r'(\d+\s+days?)',
+            r'(\d+\s+weeks?)'
+        ]
+        
+        for pattern in time_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                result['time_horizon'] = match.group(1)
+                break
     
     return result
 
 def generate_trading_analysis(price_data, tech_data, symbol):
-    """Generate trading recommendations - same as your existing function"""
+    """Generate enhanced trading recommendations with custom RSI thresholds (27-80)"""
     current_price = price_data.get('current_price', 1450.0)
     rsi = tech_data.get('rsi', 50.0)
     trend = price_data.get('trend', 'Neutral')
-    support = price_data.get('support', current_price * 0.95)
-    resistance = price_data.get('resistance', current_price * 1.05)
     
-    # Generate signal
-    if rsi < 30 and trend == 'Bullish':
+    # Get multiple support and resistance levels
+    support_levels = price_data.get('support_levels', [current_price * 0.97, current_price * 0.94, current_price * 0.91])
+    resistance_levels = price_data.get('resistance_levels', [current_price * 1.03, current_price * 1.06, current_price * 1.09])
+    
+    # Ensure we have 3 levels each
+    while len(support_levels) < 3:
+        support_levels.append(current_price * (0.97 - 0.03 * len(support_levels)))
+    
+    while len(resistance_levels) < 3:
+        resistance_levels.append(current_price * (1.03 + 0.03 * len(resistance_levels)))
+    
+    # Generate signal based on CUSTOM RSI thresholds (27-80 instead of 30-70)
+    if rsi < 27 and trend == 'Bullish':
         signal = 'STRONG BUY'
-    elif rsi < 40 and trend in ['Bullish', 'Neutral']:
+    elif rsi < 35 and trend in ['Bullish', 'Neutral']:
         signal = 'BUY'
-    elif rsi > 70 and trend == 'Bearish':
+    elif rsi > 80 and trend == 'Bearish':
         signal = 'STRONG SELL'
-    elif rsi > 60 and trend in ['Bearish', 'Neutral']:
+    elif rsi > 75 and trend in ['Bearish', 'Neutral']:
         signal = 'SELL'
     else:
         signal = 'HOLD'
+        
+    print()
+    print("------------------- SIGNAL: " + signal)
+    print()
     
-    # Calculate levels
+    # Calculate entry levels based on multiple supports/resistances
     if 'BUY' in signal:
         entry_levels = {
-            'conservative': support * 1.01,
-            'aggressive': current_price * 1.002
+            'aggressive': max(support_levels) * 1.005,
+            'moderate': (support_levels[0] + support_levels[1]) / 2,
+            'conservative': support_levels[0] * 1.01
         }
-        targets = [current_price * 1.03, current_price * 1.06, resistance * 0.98]
-        stop_loss = support * 0.98
+        targets = resistance_levels
+        stop_loss = min(support_levels) * 0.98
     elif 'SELL' in signal:
         entry_levels = {
-            'conservative': resistance * 0.99,
-            'aggressive': current_price * 0.998
+            'aggressive': min(resistance_levels) * 0.995,
+            'moderate': (resistance_levels[0] + resistance_levels[1]) / 2,
+            'conservative': resistance_levels[0] * 0.99
         }
-        targets = [current_price * 0.97, current_price * 0.94, support * 1.02]
-        stop_loss = resistance * 1.02
+        targets = [s for s in reversed(support_levels)]
+        stop_loss = max(resistance_levels) * 1.02
     else:
         entry_levels = {'current': current_price}
-        targets = [current_price * 1.03, current_price * 1.06, current_price * 1.09]
-        stop_loss = current_price * 0.95
+        targets = resistance_levels
+        stop_loss = min(support_levels) * 0.98
+    
+    # Get trading style and time horizon from analysis
+    trading_style = price_data.get('trading_style') or tech_data.get('trading_style', 'Swing Trading')
+    time_horizon = price_data.get('time_horizon') or tech_data.get('time_horizon', '3-7 days')
     
     return {
         'symbol': symbol,
@@ -273,20 +494,44 @@ def generate_trading_analysis(price_data, tech_data, symbol):
         'signal': signal,
         'trend': trend,
         'rsi': rsi,
-        'support': support,
-        'resistance': resistance,
+        'support_levels': support_levels,
+        'resistance_levels': resistance_levels,
         'entry_levels': entry_levels,
         'targets': targets,
         'stop_loss': stop_loss,
+        'trading_style': trading_style,
+        'time_horizon': time_horizon,
+        'chart_pattern': price_data.get('chart_pattern', 'Not identified'),
+        'candlestick_pattern': price_data.get('candlestick_pattern', 'Not identified'),
+        'trendline_pattern': price_data.get('trendline_pattern', 'Not identified'),
         'ema_20': price_data.get('ema_20', 'N/A'),
         'ema_50': price_data.get('ema_50', 'N/A'),
+        'ema_200': price_data.get('ema_200', 'N/A'),
         'macd_line': tech_data.get('macd_line', 'N/A'),
+        'macd_signal': tech_data.get('macd_signal', 'N/A'),
         'price_analysis': price_data.get('raw_analysis', 'Not available'),
         'tech_analysis': tech_data.get('raw_analysis', 'Not available')
     }
 
+def sanitize_text_for_telegram(text):
+    """Sanitize text to prevent Telegram Markdown parsing errors - IMPROVED VERSION"""
+    if not text:
+        return "Not available"
+    
+    # Convert to string and only escape the most problematic characters
+    text = str(text)
+    
+    # Only escape characters that commonly break Telegram messages
+    # Removed most escaping to improve readability
+    text = text.replace('`', "'")  # Replace backticks with single quotes
+    text = text.replace('*', '•')  # Replace asterisks with bullets
+    text = text.replace('_', '-')  # Replace underscores with hyphens
+    
+    # Keep other characters as they rarely cause issues in plain text mode
+    return text
+
 def format_analysis_text_telegram(text):
-    """Format analysis text for Telegram (no HTML)"""
+    """Format analysis text for Telegram (no HTML) - Keep it concise and safe"""
     if not text:
         return "Analysis not available"
     
@@ -300,29 +545,66 @@ def format_analysis_text_telegram(text):
         line = re.sub(r'^\d+\.\s*', '', line)
         line = re.sub(r'^[-*•]\s*', '', line)
         
-        # Add emojis based on content
-        if any(word in line.lower() for word in ['price', 'current', 'trading']):
-            icon = '💰'
-        elif any(word in line.lower() for word in ['ema', 'moving average', 'ma']):
-            icon = '📈'
-        elif any(word in line.lower() for word in ['support', 'resistance']):
-            icon = '🎯'
-        elif any(word in line.lower() for word in ['trend', 'bullish', 'bearish']):
-            icon = '📊'
-        elif any(word in line.lower() for word in ['rsi', 'relative strength']):
-            icon = '⚡'
-        elif any(word in line.lower() for word in ['macd', 'momentum']):
-            icon = '🔄'
-        elif any(word in line.lower() for word in ['volume', 'vol']):
-            icon = '📦'
-        elif any(word in line.lower() for word in ['pattern', 'candlestick']):
-            icon = '🕯️'
-        else:
-            icon = '📌'
+        # Sanitize the line for Telegram
+        line = sanitize_text_for_telegram(line)
         
-        lines.append(f'{icon} {line}')
+        # Keep only the most important lines (limit to 5 lines max)
+        if any(word in line.lower() for word in ['price', 'support', 'resistance', 'trend', 'signal', 'rsi', 'macd']):
+            # Add emojis based on content
+            if any(word in line.lower() for word in ['price', 'current', 'trading']):
+                icon = '💰'
+            elif any(word in line.lower() for word in ['support', 'resistance']):
+                icon = '🎯'
+            elif any(word in line.lower() for word in ['trend', 'bullish', 'bearish']):
+                icon = '📊'
+            elif any(word in line.lower() for word in ['rsi', 'relative strength']):
+                icon = '⚡'
+            elif any(word in line.lower() for word in ['macd', 'momentum']):
+                icon = '🔄'
+            else:
+                icon = '📌'
+            
+            lines.append(f'{icon} {line}')
+            
+            if len(lines) >= 5:  # Limit to 5 lines
+                break
     
     return '\n'.join(lines)
+
+async def split_and_send_message(update, text, parse_mode=None):
+    """Split long messages into chunks and send them safely without Markdown"""
+    # Don't use Markdown to avoid parsing errors - send as plain text
+    if len(text) <= MAX_MESSAGE_LENGTH:
+        await update.message.reply_text(text)
+        return
+    
+    # Split the message into chunks
+    chunks = []
+    current_chunk = ""
+    
+    for line in text.split('\n'):
+        if len(current_chunk + line + '\n') > MAX_MESSAGE_LENGTH:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = line + '\n'
+            else:
+                # Line itself is too long, split it further
+                chunks.append(line[:MAX_MESSAGE_LENGTH])
+        else:
+            current_chunk += line + '\n'
+    
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    # Send each chunk
+    for i, chunk in enumerate(chunks):
+        if i == 0:
+            await update.message.reply_text(chunk)
+        else:
+            await update.message.reply_text(f"Analysis continued...\n\n{chunk}")
+        
+        # Small delay between messages
+        await asyncio.sleep(0.5)
 
 # TELEGRAM BOT HANDLERS
 
@@ -331,23 +613,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_message = """
 🚀 *NSE Stock Technical Analysis Bot*
 
-📈 *How to use:*
-• Send me any NSE stock symbol (e.g., RELIANCE, TCS, INFY)
-• I'll analyze the charts and provide detailed technical analysis
-• Get trading recommendations with entry/exit levels
+📈 *Enhanced Features:*
+• 3-month hourly chart analysis
+• Multiple support & resistance levels
+• Chart pattern recognition
+• Trading style recommendations
+• Time horizon specifications
 
-💡 *Examples:*
+💡 *How to use:*
+• Send me any NSE stock symbol (e.g., RELIANCE, TCS, INFY)
+• Get detailed technical analysis with trading recommendations
+• Receive entry/exit levels with time-based strategies
+
+🔥 *Examples:*
 • RELIANCE
 • TCS
 • INFY
 • HDFCBANK
 
-🔥 Just send the ticker symbol and I'll do the rest!
+📊 Just send the ticker symbol and I'll provide comprehensive analysis!
     """
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
+# Updated analyze_stock function with safer message formatting
 async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle stock analysis requests"""
+    """Handle stock analysis requests with enhanced analysis - SAFE VERSION"""
     symbol = update.message.text.strip().upper()
     
     # Basic validation
@@ -356,19 +646,19 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Send initial message
-    status_message = await update.message.reply_text(f"🔍 Analyzing {symbol}...\n⏳ Downloading charts...")
+    status_message = await update.message.reply_text(f"🔍 Analyzing {symbol}...\n⏳ Downloading 3-month charts...")
     
     try:
-        # Download charts
+        # Download charts with 3-month range
         chart_data = fetch_charts(f"NSE:{symbol}", interval='1h')
         
         if not chart_data:
             await status_message.edit_text(f"❌ Could not download charts for {symbol}. Please check the symbol and try again.")
             return
         
-        await status_message.edit_text(f"🔍 Analyzing {symbol}...\n📊 Processing charts with AI...")
+        await status_message.edit_text(f"🔍 Analyzing {symbol}...\n🤖 AI processing 3-month charts...")
         
-        # Analyze charts
+        # Analyze charts with enhanced AI prompts
         price_data = {}
         tech_data = {}
         
@@ -382,9 +672,9 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     tech_data = analysis
         
-        await status_message.edit_text(f"🔍 Analyzing {symbol}...\n🎯 Generating recommendations...")
+        await status_message.edit_text(f"🔍 Analyzing {symbol}...\n🎯 Generating trading strategy...")
         
-        # Generate trading analysis
+        # Generate enhanced trading analysis
         result = generate_trading_analysis(price_data, tech_data, symbol)
         result['price_analysis'] = format_analysis_text_telegram(result.get('price_analysis', ''))
         result['tech_analysis'] = format_analysis_text_telegram(result.get('tech_analysis', ''))
@@ -393,74 +683,134 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text(f"📈 Analysis complete for {symbol}!\n📤 Sending charts...")
         
         for chart in chart_data:
-            caption = "📈 Price & EMAs Chart" if chart['type'] == 'price_emas' else "📊 RSI & MACD Chart"
+            caption = "📈 3-Month Price & EMAs Chart" if chart['type'] == 'price_emas' else "📊 3-Month RSI & MACD Chart"
             await update.message.reply_photo(
                 photo=io.BytesIO(chart['data']),
                 caption=caption,
                 filename=chart['filename']
             )
         
-        # Format and send analysis
-        analysis_text = f"""
-📊 *{result['symbol']} Technical Analysis*
+        # Create main analysis message - PLAIN TEXT VERSION (no Markdown)
+        main_analysis = f"""📊 {result['symbol']} Technical Analysis (3-Month Hourly)
 
-💰 *Current Data:*
-• Price: ₹{result['current_price']:.2f}
-• Trend: {result['trend']}
-• RSI: {result['rsi']:.1f}
-• EMA 20: {result['ema_20']}
-• EMA 50: {result['ema_50']}
-• MACD: {result['macd_line']}
-• Support: ₹{result['support']:.2f}
-• Resistance: ₹{result['resistance']:.2f}
+💰 Market Data:
+• Price: ₹{result['current_price']:.2f} | Trend: {result['trend']} | RSI: {result['rsi']:.1f}
+• EMA20/50/200: {result['ema_20']}/{result['ema_50']}/{result['ema_200']}
 
-🎯 *Trading Signal: {result['signal']}*
+🎯 Support Levels:
+• S1: ₹{result['support_levels'][0]:.2f} | S2: ₹{result['support_levels'][1]:.2f} | S3: ₹{result['support_levels'][2]:.2f}
 
-📈 *Entry Levels:*
+🚀 Resistance Levels:
+• R1: ₹{result['resistance_levels'][0]:.2f} | R2: ₹{result['resistance_levels'][1]:.2f} | R3: ₹{result['resistance_levels'][2]:.2f}
+
+🔥 Signal: {result['signal']}
+⏰ Strategy: {result['trading_style']} | Time: {result['time_horizon']}
+
+🕯️ Patterns:
+• Chart: {result['chart_pattern']} | Candle: {result['candlestick_pattern']}
+• Trendline: {result['trendline_pattern']}"""
+        
+        # Entry and targets message
+        entry_analysis = f"""📈 Entry Strategies:
 """
-        
         for level, price in result['entry_levels'].items():
-            analysis_text += f"• {level.title()}: ₹{price:.2f}\n"
+            entry_analysis += f"• {level.title()}: ₹{price:.2f}\n"
         
-        analysis_text += f"""
-🎯 *Targets:*
-• Target 1: ₹{result['targets'][0]:.2f}
-• Target 2: ₹{result['targets'][1]:.2f}
-• Target 3: ₹{result['targets'][2]:.2f}
-
-⛔ *Stop Loss:* ₹{result['stop_loss']:.2f}
-
-📈 *Price & EMAs Analysis:*
+        entry_analysis += f"""
+🎯 Targets: ₹{result['targets'][0]:.2f} | ₹{result['targets'][1]:.2f} | ₹{result['targets'][2]:.2f}
+⛔ Stop Loss: ₹{result['stop_loss']:.2f}"""
+        
+        # AI Analysis sections
+        ai_analysis = f"""📈 AI Price Analysis:
 {result['price_analysis']}
 
-📊 *Technical Indicators Analysis:*
+📊 AI Technical Analysis:
 {result['tech_analysis']}
-        """
+
+💡 Note: Analysis based on 3-month hourly data"""
         
+        # Delete status message and send analysis in parts
         await status_message.delete()
-        await update.message.reply_text(analysis_text, parse_mode='Markdown')
+        
+        # Send main analysis (plain text, no Markdown)
+        await update.message.reply_text(main_analysis)
+        
+        # Send entry analysis (plain text, no Markdown)
+        await update.message.reply_text(entry_analysis)
+        
+        # Send AI analysis (this might be longer, so use the split function)
+        await split_and_send_message(update, ai_analysis)
+        
+        # Send comprehensive summary analysis
+        summary_text = create_summary_analysis(result)
+        await asyncio.sleep(1)  # Small delay
+        await update.message.reply_text("📋 COMPREHENSIVE SUMMARY")
+        await split_and_send_message(update, summary_text)
         
     except Exception as e:
-        await status_message.edit_text(f"❌ Analysis failed for {symbol}: {str(e)}")
-        print(f"Analysis error: {e}")
+        error_msg = f"❌ Analysis failed for {symbol}: {str(e)}"
+        print(f"Error in analyze_stock: {e}")  # Add logging to terminal
+        try:
+            await status_message.edit_text(error_msg)
+        except:
+            # If editing fails, send a new message
+            await update.message.reply_text(error_msg)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send help message."""
+    help_text = """
+🚀 *NSE Stock Technical Analysis Bot Help*
+
+📊 *Features:*
+• 3-month hourly chart analysis
+• Multiple support & resistance levels
+• AI-powered pattern recognition
+• Trading recommendations with time horizons
+
+💡 *Commands:*
+• /start - Start the bot
+• /help - Show this help message
+• Just send any NSE stock symbol for analysis
+
+🔥 *Valid Symbols:*
+• RELIANCE, TCS, INFY, HDFCBANK
+• WIPRO, ICICIBANK, SBIN, LT
+• BAJFINANCE, ASIANPAINT, etc.
+
+📈 *Analysis Includes:*
+• Current price & trend direction
+• 3 support and 3 resistance levels
+• RSI, MACD, EMA indicators
+• Chart patterns & candlestick patterns
+• Entry strategies (aggressive/moderate/conservative)
+• Target levels and stop loss
+
+⚠️ *Disclaimer:* This is for educational purposes only. Please do your own research before making investment decisions.
+    """
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle all text messages as stock symbol requests."""
+    await analyze_stock(update, context)
 
 def main():
     """Start the bot."""
     if not TELEGRAM_BOT_TOKEN:
-        print("❌ TELEGRAM_BOT_TOKEN not found in environment variables!")
+        print("❌ TELEGRAM_BOT_TOKEN not found in environment variables")
         return
     
-    print("🚀 Starting NSE Stock Analysis Telegram Bot...")
+    print("🚀 Starting NSE Technical Analysis Bot...")
     
-    # Create application
+    # Create the Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyze_stock))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Run the bot
-    print("✅ Bot is running! Send /start to begin.")
+    # Start the bot
+    print("✅ Bot is running. Press Ctrl+C to stop.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':

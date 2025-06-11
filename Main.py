@@ -197,12 +197,7 @@ Provide specific numbers and clear momentum assessment."""
         
         if response.status_code == 200:
             result = response.json()
-            print("################################################## RESULT ##################################################")
-            print(result)
-            print()
             content = result['choices'][0]['message']['content']
-            print("################################################## CONTENT ##################################################")
-            print(content)
             return parse_analysis(content, chart_type)
         else:
             print(f"Groq API error: {response.status_code}")
@@ -402,6 +397,63 @@ def parse_analysis(text, chart_type):
                     break
                 except:
                     continue
+    
+    
+    # Extract conclusion and summary sections - ENHANCED VERSION with FIXED LOGIC
+    def extract_section(text, section_keywords):
+        """Extract sections with various formatting patterns - FIXED VERSION"""
+        for keyword in section_keywords:
+            # Pattern 1: **KEYWORD**: or **KEYWORD** followed by content
+            pattern1 = rf'\*\*{keyword}\*\*:?\s*(.*?)(?=\n\*\*[A-Z]|\n##|\Z)'
+            match = re.search(pattern1, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                content = match.group(1).strip()
+                if content and len(content) > 10:
+                    return content
+            
+            # Pattern 2: ## KEYWORD followed by content  
+            pattern2 = rf'##\s*{keyword}\s*(.*?)(?=\n##|\Z)'
+            match = re.search(pattern2, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                content = match.group(1).strip()
+                if content and len(content) > 10:
+                    return content
+            
+            # Pattern 3: KEYWORD: at start of line
+            pattern3 = rf'^{keyword}:\s*(.*?)(?=\n[A-Z][A-Z\s]*:|\Z)'
+            match = re.search(pattern3, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+            if match:
+                content = match.group(1).strip()
+                if content and len(content) > 10:
+                    return content
+        
+        return None
+    
+    # FIXED: Extract conclusion/summary based on chart type
+    if 'price_emas' in chart_type:
+        # For price charts, extract conclusion
+        conclusion_keywords = ['conclusion', 'summary', 'overall', 'final analysis', 'takeaway', 'bottom line']
+        extracted_conclusion = extract_section(text, conclusion_keywords)
+        if extracted_conclusion:
+            result['conclusion'] = extracted_conclusion
+    else:
+        # For tech indicator charts, extract summary
+        summary_keywords = ['summary', 'conclusion', 'key points', 'highlights', 'main points', 'overview', 'analysis summary']
+        extracted_summary = extract_section(text, summary_keywords)
+        if extracted_summary:
+            result['summary'] = extracted_summary
+
+    # Additional fallback: Look for any concluding paragraphs at the end
+    if not result.get('conclusion') and not result.get('summary'):
+        # Get last few sentences that might be concluding remarks
+        sentences = text.split('.')
+        if len(sentences) >= 2:
+            last_sentences = '. '.join(sentences[-3:]).strip()
+            if len(last_sentences) > 50:
+                if 'price_emas' in chart_type:
+                    result['conclusion'] = last_sentences
+                else:
+                    result['summary'] = last_sentences
     
     return result
 
@@ -734,6 +786,48 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
       • RSI at {safe_format_number(rsi)} suggests {'oversold bounce potential' if rsi_status == 'oversold' else 'overbought correction risk' if rsi_status == 'overbought' else 'neutral momentum - watch for directional break'}
       • Watch for hourly close > {resistance_1_str} (continue up) or < {support_1_str} (deeper pullback)
       • Pattern: {chart_pattern.split(' - ')[0].lower()} - {'bullish continuation expected' if bias == 'BUY' else 'bearish continuation expected' if bias == 'SELL' else 'range-bound action likely'}"""
+
+    # Add conclusion and summary sections at the end
+    print()
+    print(" ########### price_data ########### ")
+    print(price_data)
+    print()
+    price_conclusion = price_data.get('conclusion')
+    print()
+    print(" ########### tech_data ########### ")
+    print(tech_data)
+    print()
+    tech_summary = tech_data.get('summary')
+    
+    # DEBUG: Print extracted sections
+    if DEBUG_MODE:
+        print(f"Price conclusion found: {bool(price_conclusion)}")
+        print(f"Tech summary found: {bool(tech_summary)}")
+        if price_conclusion:
+            print(f"Price conclusion: {price_conclusion[:100]}...")
+        if tech_summary:
+            print(f"Tech summary: {tech_summary[:100]}...")
+    
+    if price_conclusion:
+        report += f"""
+
+   • **Conclusion (Analysis based on EMAs and Prices alone)**
+      • {price_conclusion}"""
+    
+    if tech_summary:
+        report += f"""
+
+   • **Summary (Analysis based on Momentum Indicators)**
+      • {tech_summary}"""
+      
+    report += f"""
+    
+    **NOTE:**
+    Take both the Conclusion and Summary Analysis into account for your personal trading strategy.
+    This report was generated using AI.
+    This is not investment advice and hence all actions are the users responsibility. 
+    This bot or the creators of it do not bear any responsibility on the results from the AI.
+    """
 
     return report
     

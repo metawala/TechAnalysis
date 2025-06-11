@@ -13,6 +13,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import io
 import yfinance as yf
+import warnings
 
 load_dotenv()
 
@@ -219,9 +220,9 @@ def parse_analysis(text, chart_type):
     if 'price_emas' in chart_type:
         # Extract price data - FIXED patterns
         price_patterns = [
-            r'current\s+price[:\s*]+₹?(\d+\.?\d*)',
-            r'price[:\s*]+₹(\d+\.?\d*)',
-            r'₹(\d+\.?\d*)'
+            r'current\s+price[:\s*]+[₹$]?(\d+\.?\d*)',
+            r'price[:\s*]+[₹$]?(\d+\.?\d*)',
+            r'[₹$](\d+\.?\d*)'
         ]
         
         for pattern in price_patterns:
@@ -230,94 +231,94 @@ def parse_analysis(text, chart_type):
                 result['current_price'] = float(match.group(1))
                 break
         
-        # Extract EMAs - FIXED patterns to match Groq output format
-        ema_patterns = [
-            # Pattern for "EMA20 value: ₹261.54" format
-            (r'ema20\s+value[:\s*]+₹(\d+\.?\d*)', 'ema_20'),
-            (r'ema\s*20\s+value[:\s*]+₹(\d+\.?\d*)', 'ema_20'),
-            # Pattern for "4. **EMA20 value:** ₹261.54" format
-            (r'\d+\.\s*\*\*ema20\s+value\*\*[:\s*]+₹(\d+\.?\d*)', 'ema_20'),
-            
-            (r'ema50\s+value[:\s*]+₹(\d+\.?\d*)', 'ema_50'),
-            (r'ema\s*50\s+value[:\s*]+₹(\d+\.?\d*)', 'ema_50'),
-            (r'\d+\.\s*\*\*ema50\s+value\*\*[:\s*]+₹(\d+\.?\d*)', 'ema_50'),
-            
-            (r'ema200\s+value[:\s*]+₹(\d+\.?\d*)', 'ema_200'),
-            (r'ema\s*200\s+value[:\s*]+₹(\d+\.?\d*)', 'ema_200'),
-            (r'\d+\.\s*\*\*ema200\s+value\*\*[:\s*]+₹(\d+\.?\d*)', 'ema_200')
-        ]
+        # Extract EMAs - MORE FLEXIBLE patterns
+        # First try to find EMA values with any format
+        ema_search_patterns = {
+            'ema_20': [
+                r'ema\s*20[^0-9]*?(\d+\.?\d*)',
+                r'20\s*ema[^0-9]*?(\d+\.?\d*)',
+                r'ema20[^0-9]*?(\d+\.?\d*)',
+                r'20-period\s*ema[^0-9]*?(\d+\.?\d*)',
+                r'20\s*period[^0-9]*?(\d+\.?\d*)'
+            ],
+            'ema_50': [
+                r'ema\s*50[^0-9]*?(\d+\.?\d*)',
+                r'50\s*ema[^0-9]*?(\d+\.?\d*)',
+                r'ema50[^0-9]*?(\d+\.?\d*)',
+                r'50-period\s*ema[^0-9]*?(\d+\.?\d*)',
+                r'50\s*period[^0-9]*?(\d+\.?\d*)'
+            ],
+            'ema_200': [
+                r'ema\s*200[^0-9]*?(\d+\.?\d*)',
+                r'200\s*ema[^0-9]*?(\d+\.?\d*)',
+                r'ema200[^0-9]*?(\d+\.?\d*)',
+                r'200-period\s*ema[^0-9]*?(\d+\.?\d*)',
+                r'200\s*period[^0-9]*?(\d+\.?\d*)'
+            ]
+        }
         
-        # Debug: Print the text being analyzed
+        # Debug: Print the text being analyzed (first 500 chars)
         if DEBUG_MODE:
-            print(f"Analyzing text for EMAs: {text[:1000]}...")
+            print(f"Analyzing text for EMAs: {text[:500]}...")
         
-        for pattern, key in ema_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                result[key] = float(match.group(1))
-                if DEBUG_MODE:
-                    print(f"✅ Found {key}: {result[key]} using pattern: {pattern}")
-                break
-            else:
-                print(f"❌ Pattern failed for {key}: {pattern}")
+        for ema_key, patterns in ema_search_patterns.items():
+            found = False
+            for pattern in patterns:
+                matches = re.findall(pattern, text_lower)
+                # Filter realistic EMA values (typically stock prices range 1-50000)
+                valid_matches = [float(m) for m in matches if 1 <= float(m) <= 50000]
+                if valid_matches:
+                    result[ema_key] = valid_matches[0]  # Take first valid match
+                    if DEBUG_MODE:
+                        print(f"✅ Found {ema_key}: {result[ema_key]} using pattern: {pattern}")
+                    found = True
+                    break
+            
+            if not found and DEBUG_MODE:
+                print(f"❌ No valid {ema_key} found in text")
         
-        # ALTERNATIVE: Direct text search for EMAs if regex fails
-        if 'ema_20' not in result:
-            # Look for "EMA20 value:** ₹261.54" in the original text
-            ema20_search = re.search(r'ema20\s+value[^₹]*₹(\d+\.?\d*)', text, re.IGNORECASE)
-            if ema20_search:
-                result['ema_20'] = float(ema20_search.group(1))
-                if DEBUG_MODE:
-                    print(f"✅ Found EMA20 via alternative method: {result['ema_20']}")
-        
-        if 'ema_50' not in result:
-            ema50_search = re.search(r'ema50\s+value[^₹]*₹(\d+\.?\d*)', text, re.IGNORECASE)
-            if ema50_search:
-                result['ema_50'] = float(ema50_search.group(1))
-                if DEBUG_MODE:
-                    print(f"✅ Found EMA50 via alternative method: {result['ema_50']}")
-        
-        if 'ema_200' not in result:
-            ema200_search = re.search(r'ema200\s+value[^₹]*₹(\d+\.?\d*)', text, re.IGNORECASE)
-            if ema200_search:
-                result['ema_200'] = float(ema200_search.group(1))
-                if DEBUG_MODE:
-                    print(f"✅ Found EMA200 via alternative method: {result['ema_200']}")
-        
-        # Extract support and resistance levels - FIXED patterns
+        # Extract support and resistance levels - MORE FLEXIBLE patterns
         resistance_levels = []
         support_levels = []
         
-        # Look for resistance patterns in the original text (not lowercased)
+        # Look for any numbers that could be resistance/support levels
         resistance_patterns = [
-            r'resistance\s+level\s+1[:\s*]+₹(\d+\.?\d*)',
-            r'resistance\s+level\s+2[:\s*]+₹(\d+\.?\d*)',
-            r'resistance\s+level\s+3[:\s*]+₹(\d+\.?\d*)',
-            r'10\.\s*\*\*resistance\s+level\s+1[^₹]*₹(\d+\.?\d*)',
-            r'11\.\s*\*\*resistance\s+level\s+2[^₹]*₹(\d+\.?\d*)',
-            r'12\.\s*\*\*resistance\s+level\s+3[^₹]*₹(\d+\.?\d*)'
+            r'resistance[^0-9]*?(\d+\.?\d*)',
+            r'resistance\s*level[^0-9]*?(\d+\.?\d*)',
+            r'resistance[^0-9]*?[₹$](\d+\.?\d*)',
+            r'target[^0-9]*?(\d+\.?\d*)',
+            r'upside[^0-9]*?(\d+\.?\d*)'
         ]
         
         support_patterns = [
-            r'support\s+level\s+1[:\s*]+₹(\d+\.?\d*)',
-            r'support\s+level\s+2[:\s*]+₹(\d+\.?\d*)',
-            r'support\s+level\s+3[:\s*]+₹(\d+\.?\d*)',
-            r'13\.\s*\*\*support\s+level\s+1[^₹]*₹(\d+\.?\d*)',
-            r'14\.\s*\*\*support\s+level\s+2[^₹]*₹(\d+\.?\d*)',
-            r'15\.\s*\*\*support\s+level\s+3[^₹]*₹(\d+\.?\d*)'
+            r'support[^0-9]*?(\d+\.?\d*)',
+            r'support\s*level[^0-9]*?(\d+\.?\d*)',
+            r'support[^0-9]*?[₹$](\d+\.?\d*)',
+            r'downside[^0-9]*?(\d+\.?\d*)',
+            r'floor[^0-9]*?(\d+\.?\d*)'
         ]
         
         # Extract resistance levels
         for pattern in resistance_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                resistance_levels.append(float(match.group(1)))
+            matches = re.findall(pattern, text_lower)
+            for match in matches:
+                try:
+                    level = float(match)
+                    if 1 <= level <= 50000 and level not in resistance_levels:
+                        resistance_levels.append(level)
+                except:
+                    continue
         
         # Extract support levels
         for pattern in support_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                support_levels.append(float(match.group(1)))
+            matches = re.findall(pattern, text_lower)
+            for match in matches:
+                try:
+                    level = float(match)
+                    if 1 <= level <= 50000 and level not in support_levels:
+                        support_levels.append(level)
+                except:
+                    continue
         
         # Remove duplicates and sort
         resistance_levels = sorted(list(set(resistance_levels)), reverse=True)
@@ -344,68 +345,82 @@ def parse_analysis(text, chart_type):
                 break
     
     else:
-        # Extract RSI - FIXED patterns
+        # Extract RSI - MORE FLEXIBLE patterns
         rsi_patterns = [
-            r'rsi\s+value[:\s*]+(\d+\.?\d*)',
-            r'1\.\s*\*\*rsi\s+value[^0-9]*(\d+\.?\d*)',
+            r'rsi[^0-9]*?(\d+\.?\d*)',
+            r'relative\s*strength[^0-9]*?(\d+\.?\d*)',
+            r'rsi\s*value[^0-9]*?(\d+\.?\d*)',
             r'rsi[:\s]+(\d+\.?\d*)'
         ]
         
         for pattern in rsi_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                rsi_val = float(match.group(1))
-                if 0 <= rsi_val <= 100:
-                    result['rsi'] = rsi_val
-                    if DEBUG_MODE:
-                        print(f"✅ Found RSI: {rsi_val}")
-                    break
+            matches = re.findall(pattern, text_lower)
+            for match in matches:
+                try:
+                    rsi_val = float(match)
+                    if 0 <= rsi_val <= 100:
+                        result['rsi'] = rsi_val
+                        if DEBUG_MODE:
+                            print(f"✅ Found RSI: {rsi_val}")
+                        break
+                except:
+                    continue
+            if 'rsi' in result:
+                break
         
-        # Extract MACD - FIXED patterns
+        # Extract MACD - MORE FLEXIBLE patterns
         macd_line_patterns = [
-            r'macd\s+line[:\s*]+(\d+\.?\d*)',
-            r'3\.\s*\*\*macd\s+line[^0-9]*(\d+\.?\d*)'
+            r'macd\s*line[^0-9]*?(\d+\.?\d*)',
+            r'macd[^0-9]*?(\d+\.?\d*)',
+            r'macd\s*value[^0-9]*?(\d+\.?\d*)'
         ]
         
         for pattern in macd_line_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                result['macd_line'] = float(match.group(1))
-                if DEBUG_MODE:
-                    print(f"✅ Found MACD Line: {result['macd_line']}")
-                break
+            matches = re.findall(pattern, text_lower)
+            if matches:
+                try:
+                    result['macd_line'] = float(matches[0])
+                    if DEBUG_MODE:
+                        print(f"✅ Found MACD Line: {result['macd_line']}")
+                    break
+                except:
+                    continue
         
         macd_signal_patterns = [
-            r'macd\s+signal\s+line[:\s*]+(\d+\.?\d*)',
-            r'4\.\s*\*\*macd\s+signal\s+line[^0-9]*(\d+\.?\d*)'
+            r'macd\s*signal[^0-9]*?(\d+\.?\d*)',
+            r'signal\s*line[^0-9]*?(\d+\.?\d*)',
+            r'signal[^0-9]*?(\d+\.?\d*)'
         ]
         
         for pattern in macd_signal_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                result['macd_signal'] = float(match.group(1))
-                if DEBUG_MODE:
-                    print(f"✅ Found MACD Signal: {result['macd_signal']}")
-                break
+            matches = re.findall(pattern, text_lower)
+            if matches:
+                try:
+                    result['macd_signal'] = float(matches[0])
+                    if DEBUG_MODE:
+                        print(f"✅ Found MACD Signal: {result['macd_signal']}")
+                    break
+                except:
+                    continue
     
     return result
+
 
 def get_stock_market_cap_category(symbol):
     """Dynamically determine stock category using alternative free API"""
     try:
-        # Use BSE API for market cap data (free and reliable)
-        bse_url = f"https://api.bseindia.com/BseIndiaAPI/api/StockReachGraph/w"
-        params = {
-            'scripcode': '',  # Will need to map symbol to scripcode
-            'flag': 'sp500'
-        }
+        import warnings
+        warnings.filterwarnings('ignore')
         
-        # Alternative: Use Yahoo Finance single request without retries
+        # Use Yahoo Finance single request without retries
         nse_symbol = f"{symbol}.NS"
         stock = yf.Ticker(nse_symbol)
         
-        # Single attempt only
-        info = stock.info
+        # Single attempt only with error suppression
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            info = stock.info
+        
         market_cap_usd = info.get('marketCap', 0)
         
         if market_cap_usd and market_cap_usd > 0:
@@ -429,12 +444,17 @@ def get_stock_market_cap_category(symbol):
 def calculate_relative_strength(stock_symbol, benchmark_symbol, period='3mo'):
     """Calculate relative strength using single API call"""
     try:
-        # Single attempt, no retries
-        stock_data = yf.download(f"{stock_symbol}.NS", period=period, interval='1d', progress=False)
-        if stock_data.empty:
-            stock_data = yf.download(f"{stock_symbol}.BO", period=period, interval='1d', progress=False)
+        import warnings
+        warnings.filterwarnings('ignore')
         
-        benchmark_data = yf.download(benchmark_symbol, period=period, interval='1d', progress=False)
+        # Single attempt, no retries with error suppression
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            stock_data = yf.download(f"{stock_symbol}.NS", period=period, interval='1d', progress=False)
+            if stock_data.empty:
+                stock_data = yf.download(f"{stock_symbol}.BO", period=period, interval='1d', progress=False)
+            
+            benchmark_data = yf.download(benchmark_symbol, period=period, interval='1d', progress=False)
         
         if stock_data.empty or benchmark_data.empty:
             return None
@@ -452,6 +472,8 @@ def calculate_relative_strength(stock_symbol, benchmark_symbol, period='3mo'):
         
     except Exception:
         return None
+
+
 
 
 def get_benchmark_name(benchmark_symbol):

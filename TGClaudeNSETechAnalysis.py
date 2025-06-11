@@ -12,7 +12,6 @@ import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import io
-from bs4 import BeautifulSoup
 import yfinance as yf
 
 load_dotenv()
@@ -205,36 +204,6 @@ Provide specific numbers and clear analysis. Keep response concise."""
     except Exception as e:
         print(f"Groq analysis error: {e}")
         return None
-    
-    
-def create_summary_analysis(result):
-    """Create a comprehensive summary of both price and technical analysis"""
-    summary = f"""📋 COMPREHENSIVE ANALYSIS SUMMARY FOR {result['symbol']}
-
-🔍 MARKET OVERVIEW:
-Current market sentiment shows {result['trend'].lower()} bias with RSI at {result['rsi']:.1f} (using 27-80 range). Price is trading at ₹{result['current_price']:.2f} with the stock showing {result['signal'].lower()} characteristics.
-
-📈 PRICE ACTION ANALYSIS:
-The stock is positioned relative to key EMAs with EMA20 at {result['ema_20']}, EMA50 at {result['ema_50']}, and EMA200 at {result['ema_200']}. 
-
-Key support zones are identified at ₹{result['support_levels'][0]:.2f} (primary), ₹{result['support_levels'][1]:.2f} (secondary), and ₹{result['support_levels'][2]:.2f} (tertiary). 
-
-Resistance barriers are located at ₹{result['resistance_levels'][0]:.2f} (immediate), ₹{result['resistance_levels'][1]:.2f} (intermediate), and ₹{result['resistance_levels'][2]:.2f} (strong).
-
-🔧 TECHNICAL INDICATORS:
-RSI reading of {result['rsi']:.1f} suggests {"oversold conditions" if result['rsi'] < 27 else "overbought conditions" if result['rsi'] > 80 else "neutral momentum"}. MACD signals show {result['macd_line']} line against {result['macd_signal']} signal line.
-
-🎯 PATTERN RECOGNITION:
-Chart structure reveals {result['chart_pattern'].lower()} formation with {result['candlestick_pattern'].lower()} candlestick patterns. The overall trendline pattern appears {result['trendline_pattern'].lower()}.
-
-💡 TRADING STRATEGY:
-Recommended approach is {result['trading_style'].lower()} with {result['time_horizon']} time horizon. Current signal strength: {result['signal']}.
-
-Risk management suggests stop loss at ₹{result['stop_loss']:.2f} with profit targets at ₹{result['targets'][0]:.2f}, ₹{result['targets'][1]:.2f}, and ₹{result['targets'][2]:.2f}.
-
-⚠️ DISCLAIMER: This analysis is for educational purposes. Always conduct your own research and risk assessment before trading."""
-    
-    return summary
 
 
 
@@ -285,10 +254,15 @@ def parse_analysis(text, chart_type):
         if len(support_levels) < 3:
             general_supports = re.findall(r'support.*?(\d+\.?\d*)', text_lower)
             for support in general_supports:
-                if float(support) not in support_levels:
-                    support_levels.append(float(support))
+                support_val = float(support)
+                # Check for uniqueness (avoid duplicates within 1% range)
+                if not any(abs(support_val - existing) / existing < 0.01 for existing in support_levels):
+                    support_levels.append(support_val)
                 if len(support_levels) >= 3:
                     break
+            
+            # Sort and ensure proper ordering
+            support_levels.sort()
         
         result['support_levels'] = support_levels[:3] if support_levels else []
         
@@ -315,10 +289,15 @@ def parse_analysis(text, chart_type):
         if len(resistance_levels) < 3:
             general_resistances = re.findall(r'resistance.*?(\d+\.?\d*)', text_lower)
             for resistance in general_resistances:
-                if float(resistance) not in resistance_levels:
-                    resistance_levels.append(float(resistance))
+                resistance_val = float(resistance)
+                # Check for uniqueness (avoid duplicates within 1% range)
+                if not any(abs(resistance_val - existing) / existing < 0.01 for existing in resistance_levels):
+                    resistance_levels.append(resistance_val)
                 if len(resistance_levels) >= 3:
                     break
+            
+            # Sort in descending order
+            resistance_levels.sort(reverse=True)
         
         result['resistance_levels'] = resistance_levels[:3] if resistance_levels else []
         
@@ -430,149 +409,6 @@ def parse_analysis(text, chart_type):
                 break
     
     return result
-
-def generate_trading_analysis(price_data, tech_data, symbol):
-    """Generate enhanced trading recommendations with custom RSI thresholds (27-80)"""
-    current_price = price_data.get('current_price', 1450.0)
-    rsi = tech_data.get('rsi', 50.0)
-    trend = price_data.get('trend', 'Neutral')
-    
-    # Get multiple support and resistance levels
-    support_levels = price_data.get('support_levels', [current_price * 0.97, current_price * 0.94, current_price * 0.91])
-    resistance_levels = price_data.get('resistance_levels', [current_price * 1.03, current_price * 1.06, current_price * 1.09])
-    
-    # Ensure we have 3 levels each
-    while len(support_levels) < 3:
-        support_levels.append(current_price * (0.97 - 0.03 * len(support_levels)))
-    
-    while len(resistance_levels) < 3:
-        resistance_levels.append(current_price * (1.03 + 0.03 * len(resistance_levels)))
-    
-    # Generate signal based on CUSTOM RSI thresholds (27-80 instead of 30-70)
-    if rsi < 27 and trend == 'Bullish':
-        signal = 'STRONG BUY'
-    elif rsi < 35 and trend in ['Bullish', 'Neutral']:
-        signal = 'BUY'
-    elif rsi > 80 and trend == 'Bearish':
-        signal = 'STRONG SELL'
-    elif rsi > 75 and trend in ['Bearish', 'Neutral']:
-        signal = 'SELL'
-    else:
-        signal = 'HOLD'
-        
-    print()
-    print("------------------- RSI: " + str(rsi))
-    print("------------------- SIGNAL: " + signal)
-    print()
-    
-    # Calculate entry levels based on multiple supports/resistances
-    if 'BUY' in signal:
-        entry_levels = {
-            'aggressive': max(support_levels) * 1.005,
-            'moderate': (support_levels[0] + support_levels[1]) / 2,
-            'conservative': support_levels[0] * 1.01
-        }
-        targets = resistance_levels
-        stop_loss = min(support_levels) * 0.98
-    elif 'SELL' in signal:
-        entry_levels = {
-            'aggressive': min(resistance_levels) * 0.995,
-            'moderate': (resistance_levels[0] + resistance_levels[1]) / 2,
-            'conservative': resistance_levels[0] * 0.99
-        }
-        targets = [s for s in reversed(support_levels)]
-        stop_loss = max(resistance_levels) * 1.02
-    else:
-        entry_levels = {'current': current_price}
-        targets = resistance_levels
-        stop_loss = min(support_levels) * 0.98
-    
-    # Get trading style and time horizon from analysis
-    trading_style = price_data.get('trading_style') or tech_data.get('trading_style', 'Swing Trading')
-    time_horizon = price_data.get('time_horizon') or tech_data.get('time_horizon', '3-7 days')
-    
-    return {
-        'symbol': symbol,
-        'current_price': current_price,
-        'signal': signal,
-        'trend': trend,
-        'rsi': rsi,
-        'support_levels': support_levels,
-        'resistance_levels': resistance_levels,
-        'entry_levels': entry_levels,
-        'targets': targets,
-        'stop_loss': stop_loss,
-        'trading_style': trading_style,
-        'time_horizon': time_horizon,
-        'chart_pattern': price_data.get('chart_pattern', 'Not identified'),
-        'candlestick_pattern': price_data.get('candlestick_pattern', 'Not identified'),
-        'trendline_pattern': price_data.get('trendline_pattern', 'Not identified'),
-        'ema_20': price_data.get('ema_20', 'N/A'),
-        'ema_50': price_data.get('ema_50', 'N/A'),
-        'ema_200': price_data.get('ema_200', 'N/A'),
-        'macd_line': tech_data.get('macd_line', 'N/A'),
-        'macd_signal': tech_data.get('macd_signal', 'N/A'),
-        'price_analysis': price_data.get('raw_analysis', 'Not available'),
-        'tech_analysis': tech_data.get('raw_analysis', 'Not available')
-    }
-
-def sanitize_text_for_telegram(text):
-    """Sanitize text to prevent Telegram Markdown parsing errors - IMPROVED VERSION"""
-    if not text:
-        return "Not available"
-    
-    # Convert to string and only escape the most problematic characters
-    text = str(text)
-    
-    # Only escape characters that commonly break Telegram messages
-    # Removed most escaping to improve readability
-    text = text.replace('`', "'")  # Replace backticks with single quotes
-    text = text.replace('*', '•')  # Replace asterisks with bullets
-    text = text.replace('_', '-')  # Replace underscores with hyphens
-    
-    # Keep other characters as they rarely cause issues in plain text mode
-    return text
-
-def format_analysis_text_telegram(text):
-    """Format analysis text for Telegram (no HTML) - Keep it concise and safe"""
-    if not text:
-        return "Analysis not available"
-    
-    lines = []
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line or len(line) < 3:
-            continue
-        
-        # Remove numbered lists and bullet points
-        line = re.sub(r'^\d+\.\s*', '', line)
-        line = re.sub(r'^[-*•]\s*', '', line)
-        
-        # Sanitize the line for Telegram
-        line = sanitize_text_for_telegram(line)
-        
-        # Keep only the most important lines (limit to 5 lines max)
-        if any(word in line.lower() for word in ['price', 'support', 'resistance', 'trend', 'signal', 'rsi', 'macd']):
-            # Add emojis based on content
-            if any(word in line.lower() for word in ['price', 'current', 'trading']):
-                icon = '💰'
-            elif any(word in line.lower() for word in ['support', 'resistance']):
-                icon = '🎯'
-            elif any(word in line.lower() for word in ['trend', 'bullish', 'bearish']):
-                icon = '📊'
-            elif any(word in line.lower() for word in ['rsi', 'relative strength']):
-                icon = '⚡'
-            elif any(word in line.lower() for word in ['macd', 'momentum']):
-                icon = '🔄'
-            else:
-                icon = '📌'
-            
-            lines.append(f'{icon} {line}')
-            
-            if len(lines) >= 5:  # Limit to 5 lines
-                break
-    
-    return '\n'.join(lines)
 
 async def split_and_send_message(update, text, parse_mode=None):
     """Split long messages into chunks and send them safely without Markdown"""
@@ -715,14 +551,133 @@ def get_benchmark_name(benchmark_symbol):
     }
     return benchmark_names.get(benchmark_symbol, benchmark_symbol)
 
+def validate_and_fix_levels(levels, current_price, level_type='support'):
+    """Ensure levels are distinct and properly ordered"""
+    if not levels:
+        return []
+    
+    # Remove duplicates and sort
+    unique_levels = []
+    for level in levels:
+        if not any(abs(level - existing) / max(level, existing) < 0.005 for existing in unique_levels):  # 0.5% threshold
+            unique_levels.append(level)
+    
+    # Sort based on type
+    if level_type == 'support':
+        unique_levels.sort()  # Ascending: S1 < S2 < S3
+    else:  # resistance
+        unique_levels.sort(reverse=True)  # Descending: R1 > R2 > R3
+    
+    return unique_levels[:3]  # Return max 3 levels
+
 # Modify the generate_trading_analysis function to include relative strength
 def generate_trading_analysis_with_relative_strength(price_data, tech_data, symbol):
     """Generate enhanced trading recommendations with relative strength analysis"""
     
-    # Get existing analysis
-    result = generate_trading_analysis(price_data, tech_data, symbol)
+    # INLINE the logic from generate_trading_analysis() here instead of calling it
+    current_price = price_data.get('current_price', 1450.0)
+    rsi = tech_data.get('rsi', 50.0)
+    trend = price_data.get('trend', 'Neutral')
     
-    # Add relative strength analysis
+    # Get multiple support and resistance levels
+    support_levels = price_data.get('support_levels', [current_price * 0.97, current_price * 0.94, current_price * 0.91])
+    resistance_levels = price_data.get('resistance_levels', [current_price * 1.03, current_price * 1.06, current_price * 1.09])
+    
+    support_levels = validate_and_fix_levels(support_levels, current_price, 'support')
+    resistance_levels = validate_and_fix_levels(resistance_levels, current_price, 'resistance')
+    
+    # Ensure we have 3 distinct levels each
+    while len(support_levels) < 3:
+        multiplier = 0.97 - (0.02 * len(support_levels))  # Changed from 0.03 to 0.02 for better spacing
+        new_level = current_price * multiplier
+        # Ensure uniqueness
+        if not any(abs(new_level - existing) < 1.0 for existing in support_levels):
+            support_levels.append(new_level)
+        else:
+            support_levels.append(current_price * (multiplier - 0.01))  # Adjust if too close
+
+    while len(resistance_levels) < 3:
+        multiplier = 1.03 + (0.02 * len(resistance_levels))  # Changed from 0.03 to 0.02 for better spacing
+        new_level = current_price * multiplier
+        # Ensure uniqueness  
+        if not any(abs(new_level - existing) < 1.0 for existing in resistance_levels):
+            resistance_levels.append(new_level)
+        else:
+            resistance_levels.append(current_price * (multiplier + 0.01))  # Adjust if too close
+
+    # Sort to ensure proper order
+    support_levels.sort()  # S1 < S2 < S3
+    resistance_levels.sort(reverse=True)  # R1 > R2 > R3
+    
+    # Generate signal based on CUSTOM RSI thresholds (27-80 instead of 30-70)
+    if rsi < 27 and trend == 'Bullish':
+        signal = 'STRONG BUY'
+    elif rsi < 35 and trend in ['Bullish', 'Neutral']:
+        signal = 'BUY'
+    elif rsi > 80 and trend == 'Bearish':
+        signal = 'STRONG SELL'
+    elif rsi > 75 and trend in ['Bearish', 'Neutral']:
+        signal = 'SELL'
+    else:
+        signal = 'HOLD'
+        
+    print()
+    print("------------------- RSI: " + str(rsi))
+    print("------------------- SIGNAL: " + signal)
+    print()
+    
+    # Calculate entry levels based on multiple supports/resistances
+    if 'BUY' in signal:
+        entry_levels = {
+            'aggressive': max(support_levels) * 1.005,
+            'moderate': (support_levels[0] + support_levels[1]) / 2,
+            'conservative': support_levels[0] * 1.01
+        }
+        targets = sorted(resistance_levels)  # Ensure ascending order for buy targets
+        stop_loss = min(support_levels) * 0.98
+    elif 'SELL' in signal:
+        entry_levels = {
+            'aggressive': min(resistance_levels) * 0.995,
+            'moderate': (resistance_levels[0] + resistance_levels[1]) / 2,
+            'conservative': resistance_levels[0] * 0.99
+        }
+        targets = sorted(support_levels, reverse=True)  # Ensure descending order for sell targets
+        stop_loss = max(resistance_levels) * 1.02
+    else:
+        entry_levels = {'current': current_price}
+        targets = sorted(resistance_levels)  # Ensure ascending order for hold targets
+        stop_loss = min(support_levels) * 0.98
+    
+    # Get trading style and time horizon from analysis
+    trading_style = price_data.get('trading_style') or tech_data.get('trading_style', 'Swing Trading')
+    time_horizon = price_data.get('time_horizon') or tech_data.get('time_horizon', '3-7 days')
+    
+    result = {
+        'symbol': symbol,
+        'current_price': current_price,
+        'signal': signal,
+        'trend': trend,
+        'rsi': rsi,
+        'support_levels': support_levels,
+        'resistance_levels': resistance_levels,
+        'entry_levels': entry_levels,
+        'targets': targets,
+        'stop_loss': stop_loss,
+        'trading_style': trading_style,
+        'time_horizon': time_horizon,
+        'chart_pattern': price_data.get('chart_pattern', 'Not identified'),
+        'candlestick_pattern': price_data.get('candlestick_pattern', 'Not identified'),
+        'trendline_pattern': price_data.get('trendline_pattern', 'Not identified'),
+        'ema_20': price_data.get('ema_20', 'N/A'),
+        'ema_50': price_data.get('ema_50', 'N/A'),
+        'ema_200': price_data.get('ema_200', 'N/A'),
+        'macd_line': tech_data.get('macd_line', 'N/A'),
+        'macd_signal': tech_data.get('macd_signal', 'N/A'),
+        'price_analysis': price_data.get('raw_analysis', 'Not available'),
+        'tech_analysis': tech_data.get('raw_analysis', 'Not available')
+    }
+    
+    # Add relative strength analysis (existing code continues...)
     print(f"🔍 Determining market cap category for {symbol}...")
     category, benchmark_symbol = get_stock_market_cap_category(symbol)
     
@@ -965,7 +920,7 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for chart in chart_data:
             chart_type = chart['type']
-            analysis = analyze_chart_with_groq_telegram(chart['data'], chart_type, relative_strength_context)
+            analysis = analyze_chart_with_groq_telegram(chart['data'], chart_type)
             
             if analysis:
                 if chart_type == 'price_emas':
@@ -976,9 +931,25 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_message.edit_text(f"🔍 Analyzing {symbol}...\n🎯 Generating trading strategy...")
         
         # Generate enhanced trading analysis
-        result = generate_trading_analysis_with_relative_strength(price_data, tech_data, symbol)
-        result['price_analysis'] = format_analysis_text_telegram(result.get('price_analysis', ''))
-        result['tech_analysis'] = format_analysis_text_telegram(result.get('tech_analysis', ''))
+        result = generate_trading_analysis_with_relative_strength(price_data, tech_data, symbol)  
+        
+        def simple_format_analysis(text):
+            """Simple inline formatting without the complex format_analysis_text_telegram function"""
+            if not text:
+                return "Analysis not available"
+            
+            # Basic cleanup - replace problematic characters for Telegram
+            text = str(text).replace('`', "'").replace('*', '•').replace('_', '-')
+            
+            # Limit to reasonable length
+            if len(text) > 1000:
+                text = text[:1000] + "..."
+            
+            return text
+
+        # Then in analyze_stock():
+        result['price_analysis'] = simple_format_analysis(result.get('price_analysis', ''))
+        result['tech_analysis'] = simple_format_analysis(result.get('tech_analysis', ''))
         result['enhanced_signal'] = generate_enhanced_signal_with_relative_strength(result)
         
         # Send charts first

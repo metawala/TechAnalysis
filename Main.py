@@ -3,7 +3,6 @@ import datetime
 import time
 import requests
 import pandas as pd
-import numpy as np
 from dotenv import load_dotenv
 import base64
 import json
@@ -15,17 +14,128 @@ import io
 import yfinance as yf
 import warnings
 
+
+def format_value(value, format_type="currency", decimal_places=2, fallback="N/A"):
+    """Universal value formatter with type-specific formatting"""
+    if not isinstance(value, (int, float)):
+        return fallback
+    
+    if format_type == "currency" and value > 0:
+        return f"₹{value:.{decimal_places}f}"
+    elif format_type == "percent":
+        return f"{value:+.{decimal_places}f}%"
+    elif format_type == "number":
+        return f"{value:.{decimal_places}f}"
+    elif format_type == "currency" and value <= 0:
+        return fallback
+    
+    return fallback
+
+def format_error(operation, identifier, error):
+    """Standardized error message formatting"""
+    return f"❌ {operation} failed for {identifier}: {error}"
+
+def format_api_error(service, status_code):
+    """Standardized API error formatting"""
+    return f"❌ {service} API error: HTTP {status_code}"
+
 load_dotenv()
+
+def validate_api_keys():
+    """Validate all required API keys are present"""
+    missing_keys = []
+    
+    if not CHART_API_KEY:
+        missing_keys.append("CHART_API_KEY")
+    if not GROQ_API_KEY:
+        missing_keys.append("GROQ_API_KEY")
+    if not TELEGRAM_BOT_TOKEN:
+        missing_keys.append("TELEGRAM_BOT_TOKEN")
+    
+    if missing_keys:
+        print(f"❌ Missing required environment variables: {', '.join(missing_keys)}")
+        return False
+    return True
 
 # Configuration
 CHART_API_KEY = os.getenv("CHART_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-DEBUG_MODE = False  # Set to True when you want debug output
-
 # Telegram message length limit
 MAX_MESSAGE_LENGTH = 4000  # Leave some buffer under 4096 limit
+EXCHANGE_RATE_USD_TO_INR = 83
+LARGE_CAP_THRESHOLD = 20000  # crores
+MID_CAP_THRESHOLD = 5000     # crores
+
+## REMOVE THIS IF ALL CONCLUSION DO NOT EXIST.
+def extract_all_sections(text, section_keywords):
+    """Extract ALL sections matching keywords - returns list of all matches"""
+    found_sections = []
+    
+    for keyword in section_keywords:
+        # Pattern 1: **KEYWORD**: or **KEYWORD** followed by content
+        pattern1 = rf'\*\*{re.escape(keyword)}\*\*:?\s*(.*?)(?=\n\*\*[A-Z]|\n##|\n\n\*\*|\Z)'
+        matches = re.finditer(pattern1, text, re.IGNORECASE | re.DOTALL)
+        for match in matches:
+            content = match.group(1).strip()
+            content = re.sub(r'\n+', '\n', content)
+            if content and len(content) > 10:
+                found_sections.append({
+                    'keyword': keyword,
+                    'content': content,
+                    'pattern': 'bold_keyword'
+                })
+        
+        # Pattern 2: ## KEYWORD followed by content
+        pattern2 = rf'##\s*{re.escape(keyword)}\s*(.*?)(?=\n##|\n\*\*|\Z)'
+        matches = re.finditer(pattern2, text, re.IGNORECASE | re.DOTALL)
+        for match in matches:
+            content = match.group(1).strip()
+            content = re.sub(r'\n+', '\n', content)
+            if content and len(content) > 10:
+                found_sections.append({
+                    'keyword': keyword,
+                    'content': content,
+                    'pattern': 'header_keyword'
+                })
+        
+        # Pattern 3: KEYWORD: at start of line
+        pattern3 = rf'^{re.escape(keyword)}:\s*(.*?)(?=\n[A-Z][A-Z\s]*:|\n\n|\Z)'
+        matches = re.finditer(pattern3, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
+        for match in matches:
+            content = match.group(1).strip()
+            content = re.sub(r'\n+', '\n', content)
+            if content and len(content) > 10:
+                found_sections.append({
+                    'keyword': keyword,
+                    'content': content,
+                    'pattern': 'line_start'
+                })
+        
+        # Pattern 4: Look for content after keyword anywhere in text
+        pattern4 = rf'{re.escape(keyword)}[:\s]+(.*?)(?=\n\n|\Z)'
+        matches = re.finditer(pattern4, text, re.IGNORECASE | re.DOTALL)
+        for match in matches:
+            content = match.group(1).strip()
+            content = re.sub(r'\n+', '\n', content)
+            if content and len(content) > 10:
+                # Check if this content is already found by other patterns
+                is_duplicate = any(
+                    abs(len(content) - len(section['content'])) < 20 and 
+                    content[:50] == section['content'][:50] 
+                    for section in found_sections
+                )
+                if not is_duplicate:
+                    found_sections.append({
+                        'keyword': keyword,
+                        'content': content,
+                        'pattern': 'anywhere'
+                    })
+    
+    return found_sections
+
+
 
 def fetch_charts(symbol, interval='1h'):
     """Download 2 charts with 3-month range using range parameter"""
@@ -96,7 +206,7 @@ def fetch_charts(symbol, interval='1h'):
                     if i < len(chart_configs):
                         time.sleep(6)  # Rate limiting
                 else:
-                    print(f"Chart {i} failed: {response.status_code}")
+                    print(format_api_error("Chart", response.status_code))
                     
             except Exception as e:
                 print(f"Error downloading chart {i}: {e}")
@@ -110,10 +220,7 @@ def fetch_charts(symbol, interval='1h'):
 
 def analyze_chart_with_groq_telegram(chart_data, chart_type):
     """Analyze chart using Groq API with enhanced prompts for comprehensive analysis"""
-    try:
-        if not GROQ_API_KEY:
-            return None
-        
+    try:        
         # Convert raw image data to base64
         base64_image = base64.b64encode(chart_data).decode('utf-8')
         
@@ -200,15 +307,16 @@ Provide specific numbers and clear momentum assessment."""
             content = result['choices'][0]['message']['content']
             return parse_analysis(content, chart_type)
         else:
-            print(f"Groq API error: {response.status_code}")
+            print(format_api_error("Groq", response.status_code))
             return None
             
     except Exception as e:
         print(f"Groq analysis error: {e}")
         return None
 
+
 def parse_analysis(text, chart_type):
-    """Parse analysis text and extract data - FIXED VERSION"""
+    """Parse analysis text and extract data - ENHANCED VERSION to extract ALL sections"""
     result = {'raw_analysis': text}
     text_lower = text.lower()
     
@@ -227,7 +335,6 @@ def parse_analysis(text, chart_type):
                 break
         
         # Extract EMAs - MORE FLEXIBLE patterns
-        # First try to find EMA values with any format
         ema_search_patterns = {
             'ema_20': [
                 r'ema\s*20[^0-9]*?(\d+\.?\d*)',
@@ -252,31 +359,23 @@ def parse_analysis(text, chart_type):
             ]
         }
         
-        # Debug: Print the text being analyzed (first 500 chars)
-        if DEBUG_MODE:
-            print(f"Analyzing text for EMAs: {text[:500]}...")
-        
         for ema_key, patterns in ema_search_patterns.items():
             found = False
             for pattern in patterns:
                 matches = re.findall(pattern, text_lower)
-                # Filter realistic EMA values (typically stock prices range 1-50000)
                 valid_matches = [float(m) for m in matches if 1 <= float(m) <= 50000]
                 if valid_matches:
-                    result[ema_key] = valid_matches[0]  # Take first valid match
-                    if DEBUG_MODE:
-                        print(f"✅ Found {ema_key}: {result[ema_key]} using pattern: {pattern}")
+                    result[ema_key] = valid_matches[0]
                     found = True
                     break
             
-            if not found and DEBUG_MODE:
+            if not found:
                 print(f"❌ No valid {ema_key} found in text")
         
         # Extract support and resistance levels - MORE FLEXIBLE patterns
         resistance_levels = []
         support_levels = []
         
-        # Look for any numbers that could be resistance/support levels
         resistance_patterns = [
             r'resistance[^0-9]*?(\d+\.?\d*)',
             r'resistance\s*level[^0-9]*?(\d+\.?\d*)',
@@ -301,7 +400,8 @@ def parse_analysis(text, chart_type):
                     level = float(match)
                     if 1 <= level <= 50000 and level not in resistance_levels:
                         resistance_levels.append(level)
-                except:
+                except ValueError as e:
+                    print(f"⚠️ Failed to parse number: {e}")
                     continue
         
         # Extract support levels
@@ -312,7 +412,8 @@ def parse_analysis(text, chart_type):
                     level = float(match)
                     if 1 <= level <= 50000 and level not in support_levels:
                         support_levels.append(level)
-                except:
+                except ValueError as e:
+                    print(f"⚠️ Failed to parse number: {e}")
                     continue
         
         # Remove duplicates and sort
@@ -321,10 +422,6 @@ def parse_analysis(text, chart_type):
         
         result['resistance_levels'] = resistance_levels
         result['support_levels'] = support_levels
-        
-        if DEBUG_MODE:
-            print(f"✅ Found {len(resistance_levels)} resistance levels: {resistance_levels}")
-            print(f"✅ Found {len(support_levels)} support levels: {support_levels}")
         
         # Extract patterns
         chart_patterns = ['ascending channel', 'flag', 'triangle', 'channel', 'head and shoulders', 'wedge', 'pennant', 'cup and handle', 'double top', 'double bottom']
@@ -338,8 +435,22 @@ def parse_analysis(text, chart_type):
             if pattern in text_lower:
                 result['candlestick_pattern'] = pattern.title()
                 break
-    
-    else:
+        
+        # Extract ALL conclusion-like sections for price analysis
+        conclusion_keywords = [
+            'conclusion', 'summary', 'recommendation', 'recommendations', 
+            'additional observations', 'key takeaways', 'final thoughts',
+            'outlook', 'overall assessment', 'bottom line', 'analysis summary'
+        ]
+        
+        all_conclusions = extract_all_sections(text, conclusion_keywords)
+        if all_conclusions:
+            # Store all conclusions
+            result['all_conclusions'] = all_conclusions
+            # Keep the first one as main conclusion for backward compatibility
+            result['conclusion'] = all_conclusions[0]['content']
+        
+    else:  # Technical indicators chart
         # Extract RSI - MORE FLEXIBLE patterns
         rsi_patterns = [
             r'rsi[^0-9]*?(\d+\.?\d*)',
@@ -355,10 +466,9 @@ def parse_analysis(text, chart_type):
                     rsi_val = float(match)
                     if 0 <= rsi_val <= 100:
                         result['rsi'] = rsi_val
-                        if DEBUG_MODE:
-                            print(f"✅ Found RSI: {rsi_val}")
                         break
-                except:
+                except ValueError as e:
+                    print(f"⚠️ Failed to parse number: {e}")
                     continue
             if 'rsi' in result:
                 break
@@ -375,10 +485,9 @@ def parse_analysis(text, chart_type):
             if matches:
                 try:
                     result['macd_line'] = float(matches[0])
-                    if DEBUG_MODE:
-                        print(f"✅ Found MACD Line: {result['macd_line']}")
                     break
-                except:
+                except ValueError as e:
+                    print(f"⚠️ Failed to parse number: {e}")
                     continue
         
         macd_signal_patterns = [
@@ -392,78 +501,32 @@ def parse_analysis(text, chart_type):
             if matches:
                 try:
                     result['macd_signal'] = float(matches[0])
-                    if DEBUG_MODE:
-                        print(f"✅ Found MACD Signal: {result['macd_signal']}")
                     break
-                except:
+                except ValueError as e:
+                    print(f"⚠️ Failed to parse number: {e}")
                     continue
-    
-    
-    # Extract conclusion and summary sections - ENHANCED VERSION with FIXED LOGIC
-    def extract_section(text, section_keywords):
-        """Extract sections with various formatting patterns - FIXED VERSION"""
-        for keyword in section_keywords:
-            # Pattern 1: **KEYWORD**: or **KEYWORD** followed by content
-            pattern1 = rf'\*\*{keyword}\*\*:?\s*(.*?)(?=\n\*\*[A-Z]|\n##|\Z)'
-            match = re.search(pattern1, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                content = match.group(1).strip()
-                if content and len(content) > 10:
-                    return content
-            
-            # Pattern 2: ## KEYWORD followed by content  
-            pattern2 = rf'##\s*{keyword}\s*(.*?)(?=\n##|\Z)'
-            match = re.search(pattern2, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                content = match.group(1).strip()
-                if content and len(content) > 10:
-                    return content
-            
-            # Pattern 3: KEYWORD: at start of line
-            pattern3 = rf'^{keyword}:\s*(.*?)(?=\n[A-Z][A-Z\s]*:|\Z)'
-            match = re.search(pattern3, text, re.IGNORECASE | re.MULTILINE | re.DOTALL)
-            if match:
-                content = match.group(1).strip()
-                if content and len(content) > 10:
-                    return content
         
-        return None
-    
-    # FIXED: Extract conclusion/summary based on chart type
-    if 'price_emas' in chart_type:
-        # For price charts, extract conclusion
-        conclusion_keywords = ['conclusion', 'summary', 'overall', 'final analysis', 'takeaway', 'bottom line']
-        extracted_conclusion = extract_section(text, conclusion_keywords)
-        if extracted_conclusion:
-            result['conclusion'] = extracted_conclusion
-    else:
-        # For tech indicator charts, extract summary
-        summary_keywords = ['summary', 'conclusion', 'key points', 'highlights', 'main points', 'overview', 'analysis summary']
-        extracted_summary = extract_section(text, summary_keywords)
-        if extracted_summary:
-            result['summary'] = extracted_summary
-
-    # Additional fallback: Look for any concluding paragraphs at the end
-    if not result.get('conclusion') and not result.get('summary'):
-        # Get last few sentences that might be concluding remarks
-        sentences = text.split('.')
-        if len(sentences) >= 2:
-            last_sentences = '. '.join(sentences[-3:]).strip()
-            if len(last_sentences) > 50:
-                if 'price_emas' in chart_type:
-                    result['conclusion'] = last_sentences
-                else:
-                    result['summary'] = last_sentences
+        # Extract ALL summary-like sections for technical analysis
+        summary_keywords = [
+            'conclusion', 'summary', 'recommendation', 'recommendations',
+            'additional observations', 'key takeaways', 'final thoughts',
+            'outlook', 'overall assessment', 'bottom line', 'analysis summary',
+            'technical summary', 'momentum analysis', 'indicator summary'
+        ]
+        
+        all_summaries = extract_all_sections(text, summary_keywords)
+        if all_summaries:
+            # Store all summaries
+            result['all_summaries'] = all_summaries
+            # Keep the first one as main summary for backward compatibility
+            result['summary'] = all_summaries[0]['content']
     
     return result
 
 
 def get_stock_market_cap_category(symbol):
     """Dynamically determine stock category using alternative free API"""
-    try:
-        import warnings
-        warnings.filterwarnings('ignore')
-        
+    try:        
         # Use Yahoo Finance single request without retries
         nse_symbol = f"{symbol}.NS"
         stock = yf.Ticker(nse_symbol)
@@ -489,7 +552,8 @@ def get_stock_market_cap_category(symbol):
         # Default fallback
         return "Large Cap", "^NSEI"
         
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Market cap category failed for {symbol}: {e}")
         return "Large Cap", "^NSEI"
 
 
@@ -522,10 +586,9 @@ def calculate_relative_strength(stock_symbol, benchmark_symbol, period='3mo'):
             'outperforming': stock_return > benchmark_return
         }
         
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Relative strength calculation failed for {stock_symbol}: {e}")
         return None
-
-
 
 
 def get_benchmark_name(benchmark_symbol):
@@ -538,64 +601,9 @@ def get_benchmark_name(benchmark_symbol):
     }
     return benchmark_names.get(benchmark_symbol, benchmark_symbol)
 
-def generate_trade_recommendation(price_data, tech_data):
-    """Generate trade recommendation based on analysis"""
-    current_price = price_data.get('current_price', 0)
-    rsi = tech_data.get('rsi', 50)
-    
-    # Determine overall bias
-    if rsi < 30:
-        if current_price > price_data.get('ema_20', current_price):
-            bias = "BUY"
-            timeframe = "Swing Trade"
-            duration = "1-3 weeks"
-        else:
-            bias = "BUY"
-            timeframe = "Intraday"
-            duration = "Today"
-    elif rsi > 70:
-        bias = "SELL"
-        timeframe = "Swing Trade"
-        duration = "1-2 weeks"
-    else:
-        bias = "HOLD/Range Trade"
-        timeframe = "Intraday"
-        duration = "Today"
-    
-    return {
-        'bias': bias,
-        'timeframe': timeframe,
-        'duration': duration
-    }
-
 
 def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_data=None):
-    """Create the new analysis report matching the desired format - FIXED VERSION"""
-    
-    # DEBUG: Print all values before processing
-    if DEBUG_MODE:
-        print(f"DEBUG - price_data: {price_data}")
-        print(f"DEBUG - tech_data: {tech_data}")
-        print(f"DEBUG - relative_strength_data: {relative_strength_data}")
-    
-    # Helper function to safely format numbers
-    def safe_format(value, decimal_places=2, prefix="₹", fallback="N/A"):
-        """Safely format numeric values with fallback"""
-        if isinstance(value, (int, float)) and value > 0:
-            return f"{prefix}{value:.{decimal_places}f}"
-        return fallback
-    
-    def safe_format_percent(value, decimal_places=1, fallback="N/A"):
-        """Safely format percentage values"""
-        if isinstance(value, (int, float)):
-            return f"{value:+.{decimal_places}f}%"
-        return fallback
-    
-    def safe_format_number(value, decimal_places=1, fallback="N/A"):
-        """Safely format plain numbers"""
-        if isinstance(value, (int, float)):
-            return f"{value:.{decimal_places}f}"
-        return fallback
+    """Create the new analysis report matching the desired format - ENHANCED VERSION"""
     
     # Extract data with defaults and validation
     current_price = price_data.get('current_price', 0)
@@ -680,10 +688,10 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
 
     # Build the report with safe formatting
     report = f"""**Current Context**
-   • **Price:** {safe_format(current_price)}
+   • **Price:** {format_value(current_price, "currency")}
       • **EMAs:**
-         • 20 EMA ≃ {safe_format(ema_20)} | 50 EMA ≃ {safe_format(ema_50)} | 200 EMA ≃ {safe_format(ema_200)}
-      • **RSI (14):** ~{safe_format_number(rsi)} ({rsi_status})"""
+         • 20 EMA ≃ {format_value(ema_20, "currency")} | 50 EMA ≃ {format_value(ema_50, "currency")} | 200 EMA ≃ {format_value(ema_200, "currency")}
+      • **RSI (14):** ~{format_value(rsi, "number", 1)} ({rsi_status})"""
 
     # Add relative strength section if available
     if relative_strength_data:
@@ -693,8 +701,8 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
         benchmark_name = relative_strength_data.get('benchmark_name', 'Benchmark')
         
         report += f"""
-      • **Relative Strength (3M):** {safe_format_percent(rs)} vs {benchmark_name}
-         • Stock: {safe_format_percent(stock_ret)} | Benchmark: {safe_format_percent(bench_ret)}"""
+      • **Relative Strength (3M):** {format_value(rs, "percent", 1)} vs {benchmark_name}
+         • Stock: {format_value(stock_ret, "percent", 1)} | Benchmark: {format_value(bench_ret, "percent", 1)}"""
 
     report += f"""
       • **Volume:** {volume_analysis}
@@ -705,13 +713,13 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
 
    • **Key Levels**
       • **Resistance:**
-        1. {safe_format(resistance_levels[0])}
-        2. {safe_format(resistance_levels[1])}
-        3. {safe_format(resistance_levels[2])}
+        1. {format_value(resistance_levels[0], "currency")}
+        2. {format_value(resistance_levels[1], "currency")}
+        3. {format_value(resistance_levels[2], "currency")}
       • **Support:**
-        1. {safe_format(support_levels[0])}
-        2. {safe_format(support_levels[1])}
-        3. {safe_format(support_levels[2])}
+        1. {format_value(support_levels[0], "currency")}
+        2. {format_value(support_levels[1], "currency")}
+        3. {format_value(support_levels[2], "currency")}
 
    • **Trade Triggers & Targets**"""
 
@@ -726,15 +734,15 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
         report += f"""
       • **Bullish ({timeframe_rec}, {duration}):**
          • **Entry:**
-            • Aggressive: {safe_format(entry_aggressive)} (current levels)
-            • Conservative: {safe_format(entry_conservative)} (on dip to support)
+            • Aggressive: {format_value(entry_aggressive, "currency")} (current levels)
+            • Conservative: {format_value(entry_conservative, "currency")} (on dip to support)
          • **Stop:**
-            • If buying current: SL < {safe_format(support_levels[0])} (e.g. {safe_format(sl1)})
-            • If buying dip: SL < {safe_format(support_levels[1])} (e.g. {safe_format(sl2)})
+            • If buying current: SL < {format_value(support_levels[0], "currency")} (e.g. {format_value(sl1, "currency")})
+            • If buying dip: SL < {format_value(support_levels[1], "currency")} (e.g. {format_value(sl2, "currency")})
          • **Targets:**
-            1. {safe_format(resistance_levels[0])}
-            2. {safe_format(resistance_levels[1])}
-            3. {safe_format(resistance_levels[2])}"""
+            1. {format_value(resistance_levels[0], "currency")}
+            2. {format_value(resistance_levels[1], "currency")}
+            3. {format_value(resistance_levels[2], "currency")}"""
     
     elif bias == "SELL":
         # Calculate entry points safely
@@ -746,15 +754,15 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
         report += f"""
       • **Bearish ({timeframe_rec}, {duration}):**
          • **Entry:**
-            • Aggressive: {safe_format(entry_aggressive)} (current levels)
-            • Conservative: {safe_format(entry_conservative)} (on bounce to resistance)
+            • Aggressive: {format_value(entry_aggressive, "currency")} (current levels)
+            • Conservative: {format_value(entry_conservative, "currency")} (on bounce to resistance)
          • **Stop:**
-            • If shorting current: SL > {safe_format(resistance_levels[0])} (e.g. {safe_format(sl1)})
-            • If shorting bounce: SL > {safe_format(resistance_levels[1])} (e.g. {safe_format(sl2)})
+            • If shorting current: SL > {format_value(resistance_levels[0], "currency")} (e.g. {format_value(sl1, "currency")})
+            • If shorting bounce: SL > {format_value(resistance_levels[1], "currency")} (e.g. {format_value(sl2, "currency")})
          • **Targets:**
-            1. {safe_format(support_levels[0])}
-            2. {safe_format(support_levels[1])}
-            3. {safe_format(support_levels[2])}"""
+            1. {format_value(support_levels[0], "currency")}
+            2. {format_value(support_levels[1], "currency")}
+            3. {format_value(support_levels[2], "currency")}"""
     
     else:  # Range Trade or HOLD
         # Calculate range trade levels safely
@@ -768,12 +776,12 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
         
         report += f"""
       • **Intraday (Today's Range):**
-         • **Long near {safe_format(long_entry)}** (stop {safe_format(long_sl)}) → target {safe_format(long_target)}
-         • **Short near {safe_format(short_entry)}** (stop {safe_format(short_sl)}) → target {safe_format(short_target)}"""
+         • **Long near {format_value(long_entry, "currency")}** (stop {format_value(long_sl, "currency")}) → target {format_value(long_target, "currency")}
+         • **Short near {format_value(short_entry, "currency")}** (stop {format_value(short_sl, "currency")}) → target {format_value(short_target, "currency")}"""
 
     # Calculate bottom line values safely
-    resistance_1_str = safe_format(resistance_levels[0]) if isinstance(resistance_levels[0], (int, float)) and resistance_levels[0] > 0 else "key resistance"
-    support_1_str = safe_format(support_levels[0]) if isinstance(support_levels[0], (int, float)) and support_levels[0] > 0 else "key support"
+    resistance_1_str = format_value(resistance_levels[0], "currency") if isinstance(resistance_levels[0], (int, float)) and resistance_levels[0] > 0 else "key resistance"
+    support_1_str = format_value(support_levels[0], "currency") if isinstance(support_levels[0], (int, float)) and support_levels[0] > 0 else "key support"
     
     report += f"""
 
@@ -783,54 +791,75 @@ def create_new_analysis_report(price_data, tech_data, symbol, relative_strength_
       • **Monitor:** Key level breaks for trend continuation/reversal
 
    • **Bottom Line**
-      • RSI at {safe_format_number(rsi)} suggests {'oversold bounce potential' if rsi_status == 'oversold' else 'overbought correction risk' if rsi_status == 'overbought' else 'neutral momentum - watch for directional break'}
+      • RSI at {format_value(rsi, "number", 1)} suggests {'oversold bounce potential' if rsi_status == 'oversold' else 'overbought correction risk' if rsi_status == 'overbought' else 'neutral momentum - watch for directional break'}
       • Watch for hourly close > {resistance_1_str} (continue up) or < {support_1_str} (deeper pullback)
       • Pattern: {chart_pattern.split(' - ')[0].lower()} - {'bullish continuation expected' if bias == 'BUY' else 'bearish continuation expected' if bias == 'SELL' else 'range-bound action likely'}"""
 
-    # Add conclusion and summary sections at the end
-    print()
-    print(" ########### price_data ########### ")
-    print(price_data)
-    print()
-    price_conclusion = price_data.get('conclusion')
-    print()
-    print(" ########### tech_data ########### ")
-    print(tech_data)
-    print()
-    tech_summary = tech_data.get('summary')
+    # ENHANCED: Add ALL conclusion and summary sections
+    all_price_conclusions = price_data.get('all_conclusions', [])
+    all_tech_summaries = tech_data.get('all_summaries', [])
     
-    # DEBUG: Print extracted sections
-    if DEBUG_MODE:
-        print(f"Price conclusion found: {bool(price_conclusion)}")
-        print(f"Tech summary found: {bool(tech_summary)}")
+    print(all_price_conclusions)
+    print(all_tech_summaries)
+    
+    # Add all price analysis conclusions
+    if all_price_conclusions:
+        report += f"""
+
+   • **Detailed Analysis (Price & EMAs)**"""
+        for i, conclusion_data in enumerate(all_price_conclusions, 1):
+            keyword = conclusion_data['keyword'].title()
+            content = conclusion_data['content']
+            if len(all_price_conclusions) > 1:
+                report += f"""
+      • **{keyword} {i}:** {content}"""
+            else:
+                report += f"""
+      • **{keyword}:** {content}"""
+    
+    # Add all technical analysis summaries
+    if all_tech_summaries:
+        report += f"""
+
+   • **Detailed Analysis (Technical Indicators)**"""
+        for i, summary_data in enumerate(all_tech_summaries, 1):
+            keyword = summary_data['keyword'].title()
+            content = summary_data['content']
+            if len(all_tech_summaries) > 1:
+                report += f"""
+      • **{keyword} {i}:** {content}"""
+            else:
+                report += f"""
+      • **{keyword}:** {content}"""
+    
+    # Fallback: If no conclusions/summaries were extracted, add the old logic
+    if not all_price_conclusions and not all_tech_summaries:
+        price_conclusion = price_data.get('conclusion')
+        tech_summary = tech_data.get('summary')
+        
         if price_conclusion:
-            print(f"Price conclusion: {price_conclusion[:100]}...")
+            report += f"""
+
+        • **Detailed Analysis (Price & EMAs)**
+            • {price_conclusion}"""
+                
         if tech_summary:
-            print(f"Tech summary: {tech_summary[:100]}...")
-    
-    if price_conclusion:
-        report += f"""
+                    report += f"""
 
-   • **Conclusion (Analysis based on EMAs and Prices alone)**
-      • {price_conclusion}"""
-    
-    if tech_summary:
-        report += f"""
-
-   • **Summary (Analysis based on Momentum Indicators)**
-      • {tech_summary}"""
+        • **Detailed Analysis (Technical Indicators)**
+            • {tech_summary}"""
       
     report += f"""
     
     **NOTE:**
-    Take both the Conclusion and Summary Analysis into account for your personal trading strategy.
+    Take both the Detailed Analysis (Price & EMAs) & (Technical Indicators) - into account for your personal trading strategy.
     This report was generated using AI.
     This is not investment advice and hence all actions are the users responsibility. 
     This bot or the creators of it do not bear any responsibility on the results from the AI.
     """
 
     return report
-    
+
 
 async def split_and_send_message(update, text, parse_mode=None):
     """Split long messages into chunks and send them safely"""
@@ -970,7 +999,7 @@ async def analyze_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await split_and_send_message(update, analysis_report, parse_mode='Markdown')
         
     except Exception as e:
-        error_msg = f"❌ Analysis failed for {symbol}: {str(e)}"
+        error_msg = format_error("Analysis", symbol, str(e))
         print(f"Error in analyze_stock: {e}")
         try:
             await status_message.edit_text(error_msg)
@@ -1017,8 +1046,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot."""
-    if not TELEGRAM_BOT_TOKEN:
-        print("❌ TELEGRAM_BOT_TOKEN not found in environment variables")
+    if not validate_api_keys():
         return
     
     print("🚀 Starting NSE Technical Analysis Bot...")
